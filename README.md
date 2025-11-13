@@ -1,7 +1,15 @@
 # Retire.js for Caido
 
 Retire.js-like live or manual scanner for Caido: checks request/response URLs, filenames and response bodies with version extraction. 
+# Installation
+## Manual install
+- Navigate to [Releases](https://github.com/bensh/caido-retirejs/releases)
+- Download the  plugin_package.zip
+- Open Cadio
+> Workspace > Plugins > Install Package > select the .zip
 
+![Manual search of libraries shown on UI](images/manual_outdated.png)
+![Search function of plugin](images/search_outdated.png)
 ## Live scan
 
 RetireJS has the ability to inspect and identifty outdated Javascript libraries on the fly while browsing in real time. 
@@ -26,9 +34,9 @@ Features include:
 - Refresh Retire.js database.
 - Expand and collapse all findings.
 
-# Installation
-
-- Download the release .zip and Install into Caido. Workspace > Plugins > Install Package
+## Findings
+![Created findings from plugin, manual and live](images/findings.png)
+![Created findings from plugin, live only](images/live_findings.png)
 
 ## Credits
 
