@@ -46,6 +46,8 @@ type BodyLike = {
   toText?: () => string | Promise<string>;
 };
 
+type HeaderMap = Record<string, unknown>;
+
 interface VulnDetail {
   summary: string;
   severity: string;
@@ -497,19 +499,12 @@ export function init(sdk: SDK<RetireAPI>): void {
           const reqUrl = reqLike?.getUrl?.() ?? "";
           const respUrl = respLike?.getUrl?.() ?? reqUrl;
 
-          const headers =
+          const headers: HeaderMap =
             typeof response.getHeaders === "function"
               ? response.getHeaders()
               : {};
-          const extractHeaderValue = (value: unknown): string => {
-            if (Array.isArray(value) && value.length > 0) {
-              const first = value[0];
-              return typeof first === "string" ? first : "";
-            }
-            return "";
-          };
-          const ctHeader = extractHeaderValue(headers["Content-Type"]);
-          const ctLowerHeader = extractHeaderValue(headers["content-type"]);
+          const ctHeader = getHeaderFirstValue(headers, "Content-Type");
+          const ctLowerHeader = getHeaderFirstValue(headers, "content-type");
           const ct = ctHeader.length > 0 ? ctHeader : ctLowerHeader;
           const ctLower = ct.toLowerCase();
 
@@ -855,17 +850,10 @@ export function init(sdk: SDK<RetireAPI>): void {
       const reqUrl = reqLike?.getUrl?.() ?? "";
       const respUrl = respLike?.getUrl?.() ?? reqUrl;
 
-      const headers =
+      const headers: HeaderMap =
         typeof response.getHeaders === "function" ? response.getHeaders() : {};
-      const extractHeaderValue = (value: unknown): string => {
-        if (Array.isArray(value) && value.length > 0) {
-          const first = value[0];
-          return typeof first === "string" ? first : "";
-        }
-        return "";
-      };
-      const ctHeader = extractHeaderValue(headers["Content-Type"]);
-      const ctLowerHeader = extractHeaderValue(headers["content-type"]);
+      const ctHeader = getHeaderFirstValue(headers, "Content-Type");
+      const ctLowerHeader = getHeaderFirstValue(headers, "content-type");
       const ct = ctHeader.length > 0 ? ctHeader : ctLowerHeader;
       const ctLower = ct.toLowerCase();
 
@@ -1078,4 +1066,16 @@ const readBodyText = async (body?: BodyLike): Promise<string> => {
   }
   const value = body.toText();
   return typeof value === "string" ? value : await value;
+};
+
+const getHeaderFirstValue = (headers: HeaderMap, key: string): string => {
+  const value = headers[key];
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value) && value.length > 0) {
+    const first = value[0];
+    return typeof first === "string" ? first : "";
+  }
+  return "";
 };
