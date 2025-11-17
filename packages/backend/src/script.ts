@@ -42,12 +42,16 @@ interface HashProvider {
   sha1?: (data: string) => string;
 }
 
+type BodyLike = {
+  toText?: () => string | Promise<string>;
+};
+
 interface VulnDetail {
   summary: string;
   severity: string;
   refs: string[];
-  below: string | null;
-  atOrAbove: string | null;
+  below?: string;
+  atOrAbove?: string;
 }
 
 interface RetireFinding {
@@ -58,8 +62,8 @@ interface RetireFinding {
   vulns: string[];
   vulnDetails: VulnDetail[];
   references: string[];
-  minBelow: string | null;
-  minAtOrAbove: string | null;
+  minBelow?: string;
+  minAtOrAbove?: string;
 }
 
 interface ScanResultEntry {
@@ -86,10 +90,10 @@ interface ToggleState {
 }
 
 type RequestLike = {
-  getHost?: () => string | null | undefined;
-  getPath?: () => string | null | undefined;
-  getId?: () => string | null | undefined;
-  getUrl?: () => string | null | undefined;
+  getHost?: () => string | undefined;
+  getPath?: () => string | undefined;
+  getId?: () => string | undefined;
+  getUrl?: () => string | undefined;
 };
 
 interface PerLibAccumulation {
@@ -98,7 +102,7 @@ interface PerLibAccumulation {
   vulns: Array<{ v: RetireVulnerability; detection: string }>;
 }
 
-export interface RetireAPI extends Record<string, (...args: any[]) => any> {
+export interface RetireAPI {
   scanCapturedJavaScript: (
     repo: RetireRepo,
     options?: ScanCapturedOptions,
@@ -107,7 +111,7 @@ export interface RetireAPI extends Record<string, (...args: any[]) => any> {
     repo: RetireRepo,
     enabled?: boolean,
     inScopeOnly?: boolean,
-  ) => Promise<ToggleState>;
+  ) => ToggleState;
 }
 
 const processedFindingKeys = new Set<string>();
@@ -118,7 +122,7 @@ export function init(sdk: SDK<RetireAPI>): void {
   //
   function makeDedupeKey(
     mode: "manual" | "live",
-    request: RequestLike | null | undefined,
+    request: RequestLike | undefined,
     libName: string,
     version: string,
   ): string {
@@ -134,9 +138,10 @@ export function init(sdk: SDK<RetireAPI>): void {
   function uniq(results: DetectionResult[]): DetectionResult[] {
     const keys: Record<string, number> = {};
     return results.filter((r) => {
-      const k = r.component + " " + r.version + " " + r.detection;
-      keys[k] = keys[k] || 0;
-      return keys[k]++ === 0;
+      const k = `${r.component} ${r.version} ${r.detection}`;
+      const previousCount = keys[k] ?? 0;
+      keys[k] = previousCount + 1;
+      return previousCount === 0;
     });
   }
 
@@ -148,12 +153,20 @@ export function init(sdk: SDK<RetireAPI>): void {
     const pattern = normalizeVersionPlaceholder(regex);
     const re = new RegExp(pattern, "g");
     const result: string[] = [];
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(data))) {
-      if (match.length > 1 && match[1]) {
-        result.push(match[1]);
+    while (true) {
+      const execResult = re.exec(data);
+      if (!execResult) {
+        break;
+      }
+      const capture = execResult[1];
+      if (
+        execResult.length > 1 &&
+        typeof capture === "string" &&
+        capture.length > 0
+      ) {
+        result.push(capture);
       } else {
-        result.push(match[0]);
+        result.push(execResult[0]);
       }
     }
     return result;
@@ -166,12 +179,11 @@ export function init(sdk: SDK<RetireAPI>): void {
     const [, body = "", replacement = ""] = ar;
     const re = new RegExp(body, "g");
     const result: string[] = [];
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(data))) {
-      if (match) {
-        const ver = match[0].replace(new RegExp(body), replacement);
-        result.push(ver);
-      }
+    while (true) {
+      const execResult = re.exec(data);
+      if (!execResult) break;
+      const ver = execResult[0].replace(new RegExp(body), replacement);
+      result.push(ver);
     }
     return result;
   }
@@ -232,7 +244,7 @@ export function init(sdk: SDK<RetireAPI>): void {
       if (!isDefined(hashes)) continue;
       if (Object.prototype.hasOwnProperty.call(hashes, hash)) {
         const version = hashes[hash];
-        if (!version) continue;
+        if (typeof version !== "string" || version.length === 0) continue;
         out.push({
           version,
           component,
@@ -255,8 +267,8 @@ export function init(sdk: SDK<RetireAPI>): void {
     version1: string | number,
     version2: string | number,
   ): boolean {
-    const v1 = String(version1).split(/[.\-]/g);
-    const v2 = String(version2).split(/[.\-]/g);
+    const v1 = String(version1).split(/[.-]/g);
+    const v2 = String(version2).split(/[.-]/g);
     const l = v1.length > v2.length ? v1.length : v2.length;
 
     for (let i = 0; i < l; i++) {
@@ -303,9 +315,15 @@ export function init(sdk: SDK<RetireAPI>): void {
             atOrAbove: v.atOrAbove,
           };
 
-          if (v.severity) vulnerability.severity = v.severity;
-          if (v.identifiers) vulnerability.identifiers = v.identifiers;
-          if (v.cwe) vulnerability.cwe = v.cwe;
+          if (typeof v.severity === "string" && v.severity.length > 0) {
+            vulnerability.severity = v.severity;
+          }
+          if (typeof v.identifiers !== "undefined") {
+            vulnerability.identifiers = v.identifiers;
+          }
+          if (typeof v.cwe !== "undefined") {
+            vulnerability.cwe = v.cwe;
+          }
 
           result.vulnerabilities.push(vulnerability);
         }
@@ -324,8 +342,8 @@ export function init(sdk: SDK<RetireAPI>): void {
     repo: RetireRepo,
     includeUri?: boolean,
   ): DetectionResult[] {
-    let result = scan(fileName, "filename", repo, splitAndMatchAll(/[\/\\]/));
-    if (includeUri) {
+    let result = scan(fileName, "filename", repo, splitAndMatchAll(/[/\\]/));
+    if (includeUri === true) {
       result = result.concat(scan(fileName.replace(/\\/g, "/"), "uri", repo));
     }
     return check(result, repo);
@@ -346,8 +364,9 @@ export function init(sdk: SDK<RetireAPI>): void {
         replacementMatch,
       );
     }
-    if (result.length === 0 && hasher && hasher.sha1) {
-      result = scanhash(hasher.sha1(normalizedContent), repo);
+    const hasherSha1 = hasher?.sha1;
+    if (result.length === 0 && typeof hasherSha1 === "function") {
+      result = scanhash(hasherSha1(normalizedContent), repo);
     }
     return check(result, repo);
   }
@@ -357,7 +376,7 @@ export function init(sdk: SDK<RetireAPI>): void {
     let best: SeverityLabel = "low";
     let score = 0;
     for (const v of vulns || []) {
-      const sevRaw = (v.severity || "low").toLowerCase();
+      const sevRaw = (v.severity ?? "low").toLowerCase();
       const sev: SeverityLabel =
         sevRaw === "high" || sevRaw === "medium" || sevRaw === "low"
           ? (sevRaw as SeverityLabel)
@@ -375,7 +394,7 @@ export function init(sdk: SDK<RetireAPI>): void {
   // === Live scanning state ===
   //
 
-  let liveRepo: RetireRepo | null = null;
+  let liveRepo: RetireRepo | undefined;
   let liveEnabled = false;
   let liveInScopeOnly = true;
 
@@ -383,8 +402,13 @@ export function init(sdk: SDK<RetireAPI>): void {
     const byUrl = new Map<string, ScanResultEntry>();
 
     for (const entry of rawResults) {
-      if (!entry || !entry.url) continue;
-      const url = entry.url;
+      if (entry === undefined || entry === null) {
+        continue;
+      }
+      const { url } = entry;
+      if (typeof url !== "string" || url.length === 0) {
+        continue;
+      }
       let existing = byUrl.get(url);
 
       if (!existing) {
@@ -392,13 +416,14 @@ export function init(sdk: SDK<RetireAPI>): void {
         byUrl.set(url, existing);
       }
 
-      for (const f of entry.findings || []) {
+      const entryFindings = entry.findings ?? [];
+      for (const f of entryFindings) {
         const already = existing.findings.some(
           (ef) =>
             ef.libName === f.libName &&
             ef.version === f.version &&
-            (ef.severity || "").toLowerCase() ===
-              (f.severity || "").toLowerCase(),
+            (ef.severity ?? "").toLowerCase() ===
+              (f.severity ?? "").toLowerCase(),
         );
         if (!already) {
           existing.findings.push(f);
@@ -423,10 +448,10 @@ export function init(sdk: SDK<RetireAPI>): void {
       const opts = options ?? {};
       const limit =
         typeof opts.limit === "number" && opts.limit >= 0 ? opts.limit : 100;
-      const inScopeOnly = !!opts.inScopeOnly;
-      const autoCreateFindings = !!opts.autoCreateFindings;
+      const inScopeOnly = Boolean(opts.inScopeOnly);
+      const autoCreateFindings = Boolean(opts.autoCreateFindings);
 
-      if (!repo || typeof repo !== "object") {
+      if (repo === undefined || repo === null || typeof repo !== "object") {
         return {
           results: [],
           counts: { scanned: 0, files: 0, high: 0, medium: 0, low: 0 },
@@ -445,12 +470,12 @@ export function init(sdk: SDK<RetireAPI>): void {
 
         let q = sdk.requests.query().descending("req", "created_at");
 
-        if (cursor) {
+        if (typeof cursor === "string" && cursor.length > 0) {
           q = q.after(cursor);
         }
 
         const page = await q.first(toFetch).execute();
-        const items = (page && page.items) || [];
+        const items = Array.isArray(page?.items) ? page.items : [];
         if (items.length === 0) {
           break; // no more history
         }
@@ -472,11 +497,20 @@ export function init(sdk: SDK<RetireAPI>): void {
           const reqUrl = reqLike?.getUrl?.() ?? "";
           const respUrl = respLike?.getUrl?.() ?? reqUrl;
 
-          const headers = response.getHeaders ? response.getHeaders() : {};
-          const ct =
-            (headers["Content-Type"] && headers["Content-Type"][0]) ||
-            (headers["content-type"] && headers["content-type"][0]) ||
-            "";
+          const headers =
+            typeof response.getHeaders === "function"
+              ? response.getHeaders()
+              : {};
+          const extractHeaderValue = (value: unknown): string => {
+            if (Array.isArray(value) && value.length > 0) {
+              const first = value[0];
+              return typeof first === "string" ? first : "";
+            }
+            return "";
+          };
+          const ctHeader = extractHeaderValue(headers["Content-Type"]);
+          const ctLowerHeader = extractHeaderValue(headers["content-type"]);
+          const ct = ctHeader.length > 0 ? ctHeader : ctLowerHeader;
           const ctLower = ct.toLowerCase();
 
           if (
@@ -487,15 +521,23 @@ export function init(sdk: SDK<RetireAPI>): void {
             continue;
           }
 
-          const bodyObj = response.getBody ? response.getBody() : null;
-          const bodyText = bodyObj ? await bodyObj.toText() : "";
-          const urlForDisplay = respUrl || reqUrl || "(unknown)";
+          const bodyObj =
+            typeof response.getBody === "function"
+              ? response.getBody()
+              : undefined;
+          const bodyText = await readBodyText(bodyObj);
+          const urlForDisplay =
+            respUrl.length > 0
+              ? respUrl
+              : reqUrl.length > 0
+                ? reqUrl
+                : "(unknown)";
           const detections: DetectionResult[] = [];
 
           // Retire.js-style detection: URL, filename, body
           detections.push(...scanUri(urlForDisplay, repo));
           detections.push(...scanFileName(urlForDisplay, repo, true));
-          if (bodyText && bodyText.length) {
+          if (bodyText.length > 0) {
             detections.push(...scanFileContent(bodyText, repo));
           }
 
@@ -530,13 +572,13 @@ export function init(sdk: SDK<RetireAPI>): void {
 
             const vulnDetails: VulnDetail[] = [];
             const allRefsSet = new Set<string>();
-            let minBelow: string | null = null;
-            let minAtOrAbove: string | null = null;
+            let minBelow: string | undefined;
+            let minAtOrAbove: string | undefined;
 
             for (const { v } of rec.vulns) {
               const infoArr = Array.isArray(v.info)
                 ? v.info
-                : v.info
+                : typeof v.info !== "undefined"
                   ? [v.info]
                   : [];
 
@@ -549,31 +591,40 @@ export function init(sdk: SDK<RetireAPI>): void {
 
               urlRefs.forEach((u) => allRefsSet.add(u));
 
-              const sevLabel = (v.severity || severity || "low").toUpperCase();
-              const belowStr = v.below ? ` (< ${v.below})` : "";
-              const atOrAboveStr = v.atOrAbove ? ` (>= ${v.atOrAbove})` : "";
+              const sevLabel = (v.severity ?? severity ?? "low").toUpperCase();
+              const belowStr =
+                typeof v.below === "string" && v.below.length > 0
+                  ? ` (< ${v.below})`
+                  : "";
+              const atOrAboveStr =
+                typeof v.atOrAbove === "string" && v.atOrAbove.length > 0
+                  ? ` (>= ${v.atOrAbove})`
+                  : "";
               const baseSummary =
-                nonUrlInfo[0] || urlRefs[0] || "Known vulnerability";
+                nonUrlInfo[0] ?? urlRefs[0] ?? "Known vulnerability";
 
               const summary = `${sevLabel}: ${baseSummary}${belowStr}${atOrAboveStr}`;
 
-              if (v.below) {
-                if (!minBelow || isAtOrAbove(minBelow, v.below)) {
+              if (typeof v.below === "string" && v.below.length > 0) {
+                if (minBelow === undefined || isAtOrAbove(minBelow, v.below)) {
                   minBelow = v.below;
                 }
               }
-              if (v.atOrAbove) {
-                if (!minAtOrAbove || isAtOrAbove(minAtOrAbove, v.atOrAbove)) {
+              if (typeof v.atOrAbove === "string" && v.atOrAbove.length > 0) {
+                if (
+                  minAtOrAbove === undefined ||
+                  isAtOrAbove(minAtOrAbove, v.atOrAbove)
+                ) {
                   minAtOrAbove = v.atOrAbove;
                 }
               }
 
               vulnDetails.push({
                 summary,
-                severity: v.severity || severity,
+                severity: v.severity ?? severity,
                 refs: urlRefs,
-                below: v.below || null,
-                atOrAbove: v.atOrAbove || null,
+                below: v.below ?? undefined,
+                atOrAbove: v.atOrAbove ?? undefined,
               });
             }
 
@@ -595,7 +646,13 @@ export function init(sdk: SDK<RetireAPI>): void {
             findings.push(findingRecord);
 
             // === Auto-create Caido Finding (batch mode) ===
-            if (autoCreateFindings && sdk.findings && sdk.findings.create) {
+            const findingsApi = sdk.findings;
+            if (
+              autoCreateFindings &&
+              findingsApi !== undefined &&
+              findingsApi !== null &&
+              typeof findingsApi.create === "function"
+            ) {
               try {
                 const dedupeKey = makeDedupeKey(
                   "manual",
@@ -606,9 +663,9 @@ export function init(sdk: SDK<RetireAPI>): void {
 
                 let exists = false;
 
-                if (sdk.findings.exists) {
+                if (typeof findingsApi.exists === "function") {
                   try {
-                    exists = await sdk.findings.exists(dedupeKey);
+                    exists = await findingsApi.exists(dedupeKey);
                   } catch {
                     exists = false;
                   }
@@ -632,9 +689,12 @@ export function init(sdk: SDK<RetireAPI>): void {
                   }
 
                   let remediation = "";
-                  if (minBelow) {
+                  if (typeof minBelow === "string" && minBelow.length > 0) {
                     remediation = `Upgrade ${rec.libName} to at least v${minBelow} (or the latest stable release) to address these issues.`;
-                  } else if (minAtOrAbove) {
+                  } else if (
+                    typeof minAtOrAbove === "string" &&
+                    minAtOrAbove.length > 0
+                  ) {
                     remediation = `Upgrade ${rec.libName} to a version newer than v${minAtOrAbove} (ideally the latest stable release) to reduce risk.`;
                   } else {
                     remediation = `Review the references and upgrade to the latest stable version of ${rec.libName} where possible.`;
@@ -647,10 +707,18 @@ export function init(sdk: SDK<RetireAPI>): void {
                   lines.push("");
                   lines.push("Context:");
                   lines.push(`- URL: ${urlForDisplay}`);
-                  if (request && request.getId) {
+                  if (
+                    request !== undefined &&
+                    request !== null &&
+                    typeof request.getId === "function"
+                  ) {
                     lines.push(`- Request ID: ${request.getId()}`);
                   }
-                  if (response && response.getCode) {
+                  if (
+                    response !== undefined &&
+                    response !== null &&
+                    typeof response.getCode === "function"
+                  ) {
                     lines.push(`- Response code: ${response.getCode()}`);
                   }
 
@@ -662,7 +730,7 @@ export function init(sdk: SDK<RetireAPI>): void {
                     }
                   }
 
-                  await sdk.findings.create({
+                  await findingsApi.create({
                     title: `${rec.libName} v${rec.version} - ${severity.toUpperCase()}`,
                     description: lines.join("\n"),
                     reporter: "RetireJS (Manual)",
@@ -671,11 +739,9 @@ export function init(sdk: SDK<RetireAPI>): void {
                   });
                 }
               } catch (err) {
-                sdk.console &&
-                  sdk.console.error &&
-                  sdk.console.error(
-                    `RetireJS plugin: error creating batch finding: ${err}`,
-                  );
+                sdk.console?.error?.(
+                  `RetireJS plugin: error creating batch finding: ${err}`,
+                );
               }
             }
           }
@@ -698,11 +764,11 @@ export function init(sdk: SDK<RetireAPI>): void {
           break;
         }
 
-        const pageInfo = (page && page.pageInfo) || {};
-        if (!pageInfo.endCursor) {
+        const endCursor = page?.pageInfo?.endCursor;
+        if (typeof endCursor !== "string" || endCursor.length === 0) {
           break;
         }
-        cursor = pageInfo.endCursor;
+        cursor = endCursor;
       }
 
       /// --- Deduplicate results by URL ---
@@ -747,17 +813,17 @@ export function init(sdk: SDK<RetireAPI>): void {
 
   sdk.api.register(
     "toggleLiveScanning",
-    async (
+    (
       _callSdk: SDK<RetireAPI>,
       repo: RetireRepo,
       enabled?: boolean,
       inScopeOnly?: boolean,
-    ): Promise<ToggleState> => {
-      if (repo && typeof repo === "object") {
+    ): ToggleState => {
+      if (repo !== undefined && repo !== null && typeof repo === "object") {
         liveRepo = repo;
       }
-      liveEnabled = !!enabled;
-      liveInScopeOnly = !!inScopeOnly;
+      liveEnabled = Boolean(enabled);
+      liveInScopeOnly = Boolean(inScopeOnly);
       return { enabled: liveEnabled };
     },
   );
@@ -771,7 +837,12 @@ export function init(sdk: SDK<RetireAPI>): void {
       if (!liveEnabled || !liveRepo) return;
 
       // Only in-scope if configured
-      if (liveInScopeOnly && callSdk.requests && callSdk.requests.inScope) {
+      if (
+        liveInScopeOnly &&
+        callSdk.requests !== undefined &&
+        callSdk.requests !== null &&
+        typeof callSdk.requests.inScope === "function"
+      ) {
         try {
           if (!callSdk.requests.inScope(request)) return;
         } catch {
@@ -784,11 +855,18 @@ export function init(sdk: SDK<RetireAPI>): void {
       const reqUrl = reqLike?.getUrl?.() ?? "";
       const respUrl = respLike?.getUrl?.() ?? reqUrl;
 
-      const headers = response.getHeaders ? response.getHeaders() : {};
-      const ct =
-        (headers["Content-Type"] && headers["Content-Type"][0]) ||
-        (headers["content-type"] && headers["content-type"][0]) ||
-        "";
+      const headers =
+        typeof response.getHeaders === "function" ? response.getHeaders() : {};
+      const extractHeaderValue = (value: unknown): string => {
+        if (Array.isArray(value) && value.length > 0) {
+          const first = value[0];
+          return typeof first === "string" ? first : "";
+        }
+        return "";
+      };
+      const ctHeader = extractHeaderValue(headers["Content-Type"]);
+      const ctLowerHeader = extractHeaderValue(headers["content-type"]);
+      const ct = ctHeader.length > 0 ? ctHeader : ctLowerHeader;
       const ctLower = ct.toLowerCase();
 
       if (
@@ -799,15 +877,17 @@ export function init(sdk: SDK<RetireAPI>): void {
         return;
       }
 
-      const bodyObj = response.getBody ? response.getBody() : null;
-      const bodyText = bodyObj ? await bodyObj.toText() : "";
+      const bodyObj =
+        typeof response.getBody === "function" ? response.getBody() : undefined;
+      const bodyText = await readBodyText(bodyObj);
 
-      const urlForDisplay = respUrl || reqUrl || "(unknown)";
+      const urlForDisplay =
+        respUrl.length > 0 ? respUrl : reqUrl.length > 0 ? reqUrl : "(unknown)";
       const detections: DetectionResult[] = [];
 
       detections.push(...scanUri(urlForDisplay, liveRepo));
       detections.push(...scanFileName(urlForDisplay, liveRepo, true));
-      if (bodyText && bodyText.length) {
+      if (bodyText.length > 0) {
         detections.push(...scanFileContent(bodyText, liveRepo));
       }
 
@@ -839,13 +919,13 @@ export function init(sdk: SDK<RetireAPI>): void {
 
         const vulnDetails: VulnDetail[] = [];
         const allRefsSet = new Set<string>();
-        let minBelow: string | null = null;
-        let minAtOrAbove: string | null = null;
+        let minBelow: string | undefined;
+        let minAtOrAbove: string | undefined;
 
         for (const { v } of rec.vulns) {
           const infoArr = Array.isArray(v.info)
             ? v.info
-            : v.info
+            : typeof v.info !== "undefined"
               ? [v.info]
               : [];
 
@@ -858,37 +938,51 @@ export function init(sdk: SDK<RetireAPI>): void {
 
           urlRefs.forEach((u) => allRefsSet.add(u));
 
-          const sevLabel = (v.severity || severity || "low").toUpperCase();
-          const belowStr = v.below ? ` (< ${v.below})` : "";
-          const atOrAboveStr = v.atOrAbove ? ` (>= ${v.atOrAbove})` : "";
+          const sevLabel = (v.severity ?? severity ?? "low").toUpperCase();
+          const belowStr =
+            typeof v.below === "string" && v.below.length > 0
+              ? ` (< ${v.below})`
+              : "";
+          const atOrAboveStr =
+            typeof v.atOrAbove === "string" && v.atOrAbove.length > 0
+              ? ` (>= ${v.atOrAbove})`
+              : "";
           const baseSummary =
-            nonUrlInfo[0] || urlRefs[0] || "Known vulnerability";
+            nonUrlInfo[0] ?? urlRefs[0] ?? "Known vulnerability";
 
           const summary = `${sevLabel}: ${baseSummary}${belowStr}${atOrAboveStr}`;
 
-          if (v.below) {
-            if (!minBelow || isAtOrAbove(minBelow, v.below)) {
+          if (typeof v.below === "string" && v.below.length > 0) {
+            if (minBelow === undefined || isAtOrAbove(minBelow, v.below)) {
               minBelow = v.below;
             }
           }
-          if (v.atOrAbove) {
-            if (!minAtOrAbove || isAtOrAbove(minAtOrAbove, v.atOrAbove)) {
+          if (typeof v.atOrAbove === "string" && v.atOrAbove.length > 0) {
+            if (
+              minAtOrAbove === undefined ||
+              isAtOrAbove(minAtOrAbove, v.atOrAbove)
+            ) {
               minAtOrAbove = v.atOrAbove;
             }
           }
 
           vulnDetails.push({
             summary,
-            severity: v.severity || severity,
+            severity: v.severity ?? severity,
             refs: urlRefs,
-            below: v.below || null,
-            atOrAbove: v.atOrAbove || null,
+            below: v.below ?? undefined,
+            atOrAbove: v.atOrAbove ?? undefined,
           });
         }
 
         const refsAll = Array.from(allRefsSet);
 
-        if (callSdk.findings && callSdk.findings.create) {
+        const liveFindingsApi = callSdk.findings;
+        if (
+          liveFindingsApi !== undefined &&
+          liveFindingsApi !== null &&
+          typeof liveFindingsApi.create === "function"
+        ) {
           try {
             // One live finding per host+path+lib+version per plugin session
             const dedupeKey = makeDedupeKey(
@@ -916,9 +1010,12 @@ export function init(sdk: SDK<RetireAPI>): void {
             }
 
             let remediation = "";
-            if (minBelow) {
+            if (typeof minBelow === "string" && minBelow.length > 0) {
               remediation = `Upgrade ${rec.libName} to at least v${minBelow} (or the latest stable release) to address these issues.`;
-            } else if (minAtOrAbove) {
+            } else if (
+              typeof minAtOrAbove === "string" &&
+              minAtOrAbove.length > 0
+            ) {
               remediation = `Upgrade ${rec.libName} to a version newer than v${minAtOrAbove} (ideally the latest stable release) to reduce risk.`;
             } else {
               remediation = `Review the references and upgrade to the latest stable version of ${rec.libName} where possible.`;
@@ -931,10 +1028,18 @@ export function init(sdk: SDK<RetireAPI>): void {
             lines.push("");
             lines.push("Context:");
             lines.push(`- URL: ${urlForDisplay}`);
-            if (request && request.getId) {
+            if (
+              request !== undefined &&
+              request !== null &&
+              typeof request.getId === "function"
+            ) {
               lines.push(`- Request ID: ${request.getId()}`);
             }
-            if (response && response.getCode) {
+            if (
+              response !== undefined &&
+              response !== null &&
+              typeof response.getCode === "function"
+            ) {
               lines.push(`- Response code: ${response.getCode()}`);
             }
 
@@ -946,7 +1051,7 @@ export function init(sdk: SDK<RetireAPI>): void {
               }
             }
 
-            await callSdk.findings.create({
+            await liveFindingsApi.create({
               title: `${rec.libName} v${rec.version} - ${severity.toUpperCase()}`,
               description: lines.join("\n"),
               reporter: "RetireJS (Live)",
@@ -954,20 +1059,23 @@ export function init(sdk: SDK<RetireAPI>): void {
               dedupeKey,
             });
           } catch (err) {
-            callSdk.console &&
-              callSdk.console.error &&
-              callSdk.console.error(
-                `RetireJS plugin: error creating live finding: ${err}`,
-              );
+            callSdk.console?.error?.(
+              `RetireJS plugin: error creating live finding: ${err}`,
+            );
           }
         }
       }
     } catch (err) {
-      sdk.console &&
-        sdk.console.error &&
-        sdk.console.error(
-          `RetireJS plugin: live scanner error: ${String(err)}`,
-        );
+      sdk.console?.error?.(
+        `RetireJS plugin: live scanner error: ${String(err)}`,
+      );
     }
   });
 }
+const readBodyText = async (body?: BodyLike): Promise<string> => {
+  if (!body || typeof body.toText !== "function") {
+    return "";
+  }
+  const value = body.toText();
+  return typeof value === "string" ? value : await value;
+};

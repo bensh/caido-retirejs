@@ -34,8 +34,8 @@ interface NormalizedVulnDetail {
   summary: string;
   severity: SeverityLabel;
   refs: string[];
-  below: string | null;
-  atOrAbove: string | null;
+  below?: string;
+  atOrAbove?: string;
 }
 
 const severityRank: Record<SeverityLabel, number> = {
@@ -44,8 +44,8 @@ const severityRank: Record<SeverityLabel, number> = {
   high: 3,
 };
 
-const normalizeSeverity = (value?: string | null): SeverityLabel => {
-  const normalized = (value || "low").toLowerCase();
+const normalizeSeverity = (value?: string): SeverityLabel => {
+  const normalized = (value ?? "low").toLowerCase();
   if (normalized === "high" || normalized === "medium") {
     return normalized;
   }
@@ -75,8 +75,8 @@ const normalizeVulnDetails = (
       summary: vd.summary,
       severity: normalizeSeverity(vd.severity || finding.severity),
       refs: sanitizeRefs(vd.refs),
-      below: vd.below ?? null,
-      atOrAbove: vd.atOrAbove ?? null,
+      below: typeof vd.below === "string" ? vd.below : undefined,
+      atOrAbove: typeof vd.atOrAbove === "string" ? vd.atOrAbove : undefined,
     }));
   }
 
@@ -85,12 +85,10 @@ const normalizeVulnDetails = (
     summary: String(summary),
     severity: normalizeSeverity(finding.severity),
     refs: [],
-    below: null,
-    atOrAbove: null,
   }));
 };
 
-export const init = async (sdk: FrontendSDK): Promise<void> => {
+export const init = (sdk: FrontendSDK): void => {
   const RETIRE_DB_URL =
     "https://raw.githubusercontent.com/RetireJS/retire.js/master/repository/jsrepository.json";
 
@@ -98,11 +96,8 @@ export const init = async (sdk: FrontendSDK): Promise<void> => {
   // Helpers
   //
 
-  function compareVersions(
-    a?: string | number | null,
-    b?: string | number | null,
-  ): number {
-    if (!a || !b) return 0;
+  function compareVersions(a?: string | number, b?: string | number): number {
+    if (typeof a === "undefined" || typeof b === "undefined") return 0;
     const pa = String(a)
       .split(/[^0-9a-zA-Z]+/)
       .filter(Boolean);
@@ -111,8 +106,8 @@ export const init = async (sdk: FrontendSDK): Promise<void> => {
       .filter(Boolean);
     const n = Math.max(pa.length, pb.length);
     for (let i = 0; i < n; i++) {
-      const va = pa[i] || "0";
-      const vb = pb[i] || "0";
+      const va = pa[i] ?? "0";
+      const vb = pb[i] ?? "0";
       const na = /^\d+$/.test(va) ? parseInt(va, 10) : va;
       const nb = /^\d+$/.test(vb) ? parseInt(vb, 10) : vb;
       if (na > nb) return 1;
@@ -121,7 +116,7 @@ export const init = async (sdk: FrontendSDK): Promise<void> => {
     return 0;
   }
 
-  let cachedRepo: BackendRepo | null = null;
+  let cachedRepo: BackendRepo | undefined;
 
   function getPrefs(): Preferences {
     const stored = sdk.storage.get() as Partial<Preferences> | undefined;
@@ -146,6 +141,7 @@ export const init = async (sdk: FrontendSDK): Promise<void> => {
   async function loadDb(force = false): Promise<BackendRepo> {
     if (cachedRepo && !force) return cachedRepo;
 
+    // eslint-disable-next-line compat/compat
     const res = await fetch(RETIRE_DB_URL);
     if (!res.ok) throw new Error("Failed to fetch Retire.js DB");
     const db = (await res.json()) as BackendRepo;
@@ -153,7 +149,7 @@ export const init = async (sdk: FrontendSDK): Promise<void> => {
     return db;
   }
 
-  function severityIcon(sev: SeverityLabel | string): string {
+  function severityIcon(sev: string): string {
     const normalized = normalizeSeverity(sev);
     if (normalized === "high") return "🔥";
     if (normalized === "medium") return "⚠️";
@@ -305,13 +301,13 @@ export const init = async (sdk: FrontendSDK): Promise<void> => {
   //
 
   function applySearchFilter(): void {
-    const q = (searchEl.value || "").toLowerCase();
+    const q = (searchEl.value ?? "").toLowerCase();
     const accordions = Array.from(
       resultsEl.querySelectorAll<HTMLDetailsElement>("details.accordion"),
     );
     for (const details of accordions) {
-      const url = details.getAttribute("data-url") || "";
-      const libs = details.getAttribute("data-libs") || "";
+      const url = details.getAttribute("data-url") ?? "";
+      const libs = details.getAttribute("data-libs") ?? "";
       const match = url.includes(q) || libs.includes(q);
       details.style.display = match ? "" : "none";
     }
@@ -421,7 +417,7 @@ export const init = async (sdk: FrontendSDK): Promise<void> => {
 
       resultsEl.innerHTML = "";
 
-      const typedResults = results || [];
+      const typedResults = results ?? [];
       typedResults.forEach((r: ScanResultEntry) => {
         const highest = highestSeverity(r.findings);
         const detailsEl = document.createElement("details");
@@ -444,7 +440,7 @@ export const init = async (sdk: FrontendSDK): Promise<void> => {
         const inner = document.createElement("div");
         inner.className = "inner";
 
-        const findings = r.findings || [];
+        const findings = r.findings ?? [];
         findings.forEach((f: RetireFinding) => {
           const card = document.createElement("div");
           card.className = "lib-card " + f.severity;
@@ -463,51 +459,59 @@ export const init = async (sdk: FrontendSDK): Promise<void> => {
           let highCount = 0,
             medCount = 0,
             lowCount = 0;
-          let sampleHigh: string | null = null,
-            sampleMed: string | null = null,
-            sampleLow: string | null = null;
-          let minBelow: string | null = null;
-          let minAtOrAbove: string | null = null;
+          let sampleHigh: string | undefined;
+          let sampleMed: string | undefined;
+          let sampleLow: string | undefined;
+          let minBelow: string | undefined;
+          let minAtOrAbove: string | undefined;
 
           vulnDetails.forEach((vd: NormalizedVulnDetail) => {
             const sev = normalizeSeverity(vd.severity || f.severity);
             if (sev === "high") {
               highCount++;
-              if (!sampleHigh) sampleHigh = vd.summary;
+              if (sampleHigh === undefined) sampleHigh = vd.summary;
             } else if (sev === "medium") {
               medCount++;
-              if (!sampleMed) sampleMed = vd.summary;
+              if (sampleMed === undefined) sampleMed = vd.summary;
             } else {
               lowCount++;
-              if (!sampleLow) sampleLow = vd.summary;
+              if (sampleLow === undefined) sampleLow = vd.summary;
             }
 
-            if (vd.below) {
-              if (!minBelow || compareVersions(vd.below, minBelow) < 0) {
-                minBelow = vd.below;
+            const vdBelow = vd.below;
+            if (typeof vdBelow === "string" && vdBelow.length > 0) {
+              if (
+                minBelow === undefined ||
+                compareVersions(vdBelow, minBelow) < 0
+              ) {
+                minBelow = vdBelow;
               }
             }
-            if (vd.atOrAbove) {
+            const vdAtOrAbove = vd.atOrAbove;
+            if (typeof vdAtOrAbove === "string" && vdAtOrAbove.length > 0) {
               if (
-                !minAtOrAbove ||
-                compareVersions(vd.atOrAbove, minAtOrAbove) < 0
+                minAtOrAbove === undefined ||
+                compareVersions(vdAtOrAbove, minAtOrAbove) < 0
               ) {
-                minAtOrAbove = vd.atOrAbove;
+                minAtOrAbove = vdAtOrAbove;
               }
             }
           });
 
           const totalVulns = highCount + medCount + lowCount;
           let summaryLine = `Uses ${f.libName}${ver} with ${totalVulns} known vulnerabilities (High: ${highCount}, Medium: ${medCount}, Low: ${lowCount}).`;
-          const highestExample = sampleHigh || sampleMed || sampleLow;
-          if (highestExample) {
+          const highestExample = sampleHigh ?? sampleMed ?? sampleLow;
+          if (typeof highestExample === "string" && highestExample.length > 0) {
             summaryLine += ` Highest impact: ${highestExample}`;
           }
 
           let remediationLine = "";
-          if (minBelow) {
+          if (typeof minBelow === "string" && minBelow.length > 0) {
             remediationLine = `Upgrade ${f.libName} to at least v${minBelow} (or the latest stable release) to address these issues.`;
-          } else if (minAtOrAbove) {
+          } else if (
+            typeof minAtOrAbove === "string" &&
+            minAtOrAbove.length > 0
+          ) {
             remediationLine = `Upgrade ${f.libName} to a version newer than v${minAtOrAbove} (ideally the latest stable release) to reduce risk.`;
           } else {
             remediationLine = `Review the references and upgrade to the latest stable version of ${f.libName} where possible.`;
@@ -526,7 +530,7 @@ export const init = async (sdk: FrontendSDK): Promise<void> => {
           const vulnRefsSet = new Set<string>();
 
           vulnDetails.forEach((vd: NormalizedVulnDetail) => {
-            const refs = vd.refs || [];
+            const refs = vd.refs ?? [];
             refs.forEach((u: string) => vulnRefsSet.add(u));
 
             if (refs.length > 0) {

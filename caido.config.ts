@@ -12,7 +12,7 @@ export default defineConfig({
   id,
   name: "RetireJS Scanner",
   description: "Retire.js-like live or manual scanner for Caido: checks request/response URLs for outdated Javascript.",
-  version: "1.0.1",
+  version: "1.0.2",
   author: {
     name: "bensh",
     email: "no-reply@caido.community",
