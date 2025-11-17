@@ -1,27 +1,138 @@
+import type { SDK } from "caido:plugin";
+
+type SeverityLabel = "low" | "medium" | "high";
+
+interface RetireVulnerability {
+  info?: string | string[];
+  below?: string;
+  atOrAbove?: string;
+  severity?: string;
+  identifiers?: Record<string, unknown>;
+  cwe?: string | string[];
+}
+
+type ExtractorGroup = ReadonlyArray<string> | Record<string, string>;
+type ExtractorName = "uri" | "filename" | "filecontent" | "filecontentreplace";
+
+interface RetireExtractors {
+  uri?: ExtractorGroup;
+  filename?: ExtractorGroup;
+  filecontent?: ExtractorGroup;
+  filecontentreplace?: ExtractorGroup;
+  hashes?: Record<string, string>;
+}
+
+interface RetireLibrary {
+  vulnerabilities?: RetireVulnerability[];
+  extractors?: RetireExtractors;
+}
+
+type RetireRepo = Record<string, RetireLibrary>;
+
+type Matcher = (regex: string, data: string) => string[];
+
+interface DetectionResult {
+  component: string;
+  version: string;
+  detection: string;
+  vulnerabilities?: RetireVulnerability[];
+}
+
+interface HashProvider {
+  sha1?: (data: string) => string;
+}
+
+interface VulnDetail {
+  summary: string;
+  severity: string;
+  refs: string[];
+  below: string | null;
+  atOrAbove: string | null;
+}
+
+interface RetireFinding {
+  libName: string;
+  version: string;
+  severity: SeverityLabel;
+  reason: string;
+  vulns: string[];
+  vulnDetails: VulnDetail[];
+  references: string[];
+  minBelow: string | null;
+  minAtOrAbove: string | null;
+}
+
+interface ScanResultEntry {
+  url: string;
+  findings: RetireFinding[];
+}
+
+interface ScanCounts {
+  scanned: number;
+  files: number;
+  high: number;
+  medium: number;
+  low: number;
+}
+
+interface ScanCapturedOptions {
+  limit?: number;
+  inScopeOnly?: boolean;
+  autoCreateFindings?: boolean;
+}
+
+interface ToggleState {
+  enabled: boolean;
+}
+
+type RequestLike = {
+  getHost?: () => string | null | undefined;
+  getPath?: () => string | null | undefined;
+  getId?: () => string | null | undefined;
+  getUrl?: () => string | null | undefined;
+};
+
+interface PerLibAccumulation {
+  libName: string;
+  version: string;
+  vulns: Array<{ v: RetireVulnerability; detection: string }>;
+}
+
+export interface RetireAPI extends Record<string, (...args: any[]) => any> {
+  scanCapturedJavaScript: (
+    repo: RetireRepo,
+    options?: ScanCapturedOptions,
+  ) => Promise<{ results: ScanResultEntry[]; counts: ScanCounts }>;
+  toggleLiveScanning: (
+    repo: RetireRepo,
+    enabled?: boolean,
+    inScopeOnly?: boolean,
+  ) => Promise<ToggleState>;
+}
+
 const processedFindingKeys = new Set<string>();
 
-export function init(sdk) {
+export function init(sdk: SDK<RetireAPI>): void {
   //
   // === Retire.js core logic (adapted from node/lib/retire.js) ===
   //
-  
   function makeDedupeKey(
-  mode: "manual" | "live",
-  request: any,
-  libName: string,
-  version: string
-) {
-  const host = request && request.getHost ? request.getHost() : "";
-  const path = request && request.getPath ? request.getPath() : "";
-  return `${mode}|${host}${path}|${libName}|${version}`;
-}
+    mode: "manual" | "live",
+    request: RequestLike | null | undefined,
+    libName: string,
+    version: string,
+  ): string {
+    const host = request?.getHost?.() ?? "";
+    const path = request?.getPath?.() ?? "";
+    return `${mode}|${host}${path}|${libName}|${version}`;
+  }
 
-  function isDefined(o) {
+  function isDefined<T>(o: T | undefined): o is T {
     return typeof o !== "undefined";
   }
 
-  function uniq(results) {
-    const keys = {};
+  function uniq(results: DetectionResult[]): DetectionResult[] {
+    const keys: Record<string, number> = {};
     return results.filter((r) => {
       const k = r.component + " " + r.version + " " + r.detection;
       keys[k] = keys[k] || 0;
@@ -29,15 +140,15 @@ export function init(sdk) {
     });
   }
 
-  function normalizeVersionPlaceholder(regex) {
+  function normalizeVersionPlaceholder(regex: string): string {
     return regex.replace(/§§version§§/g, "[0-9][0-9.a-z_\\-]+");
   }
 
-  function simpleMatch(regex, data) {
+  function simpleMatch(regex: string, data: string): string[] {
     const pattern = normalizeVersionPlaceholder(regex);
     const re = new RegExp(pattern, "g");
-    const result = [];
-    let match;
+    const result: string[] = [];
+    let match: RegExpExecArray | null;
     while ((match = re.exec(data))) {
       if (match.length > 1 && match[1]) {
         result.push(match[1]);
@@ -48,42 +159,53 @@ export function init(sdk) {
     return result;
   }
 
-  function replacementMatch(regex, data) {
+  function replacementMatch(regex: string, data: string): string[] {
     const pattern = normalizeVersionPlaceholder(regex);
     const ar = /^\/(.*[^\\])\/([^/]+)\/$/.exec(pattern);
     if (!ar) return [];
-    const re = new RegExp(ar[1], "g");
-    const result = [];
-    let match;
+    const [, body = "", replacement = ""] = ar;
+    const re = new RegExp(body, "g");
+    const result: string[] = [];
+    let match: RegExpExecArray | null;
     while ((match = re.exec(data))) {
       if (match) {
-        const ver = match[0].replace(new RegExp(ar[1]), ar[2]);
+        const ver = match[0].replace(new RegExp(body), replacement);
         result.push(ver);
       }
     }
     return result;
   }
 
-  function splitAndMatchAll(tokenizer) {
-    return function (regex, data) {
+  function splitAndMatchAll(tokenizer: RegExp | string): Matcher {
+    return function (regex: string, data: string): string[] {
       const pattern = normalizeVersionPlaceholder(regex);
-      const elm = data.split(tokenizer).pop();
+      const elm = data.split(tokenizer).pop() ?? "";
       return simpleMatch("^" + pattern + "$", elm);
     };
   }
 
-  function scan(data, extractor, repo, matcher) {
-    const detected = [];
-    const m = matcher || simpleMatch;
+  function scan(
+    data: string,
+    extractor: ExtractorName,
+    repo: RetireRepo,
+    matcher?: Matcher,
+  ): DetectionResult[] {
+    const detected: DetectionResult[] = [];
+    const m: Matcher = matcher || simpleMatch;
 
     for (const component in repo) {
       if (!Object.prototype.hasOwnProperty.call(repo, component)) continue;
-      const exRoot = repo[component].extractors || {};
+      const library = repo[component];
+      if (!library) continue;
+      const exRoot = library.extractors || {};
       const extractors = exRoot[extractor];
       if (!isDefined(extractors)) continue;
 
-      for (const i in extractors) {
-        const regex = extractors[i];
+      const patterns = Array.isArray(extractors)
+        ? extractors
+        : Object.values(extractors);
+
+      for (const regex of patterns) {
         const matches = m(regex, data);
         matches.forEach((match) => {
           if (!match) return;
@@ -99,16 +221,20 @@ export function init(sdk) {
     return uniq(detected);
   }
 
-  function scanhash(hash, repo) {
-    const out = [];
+  function scanhash(hash: string, repo: RetireRepo): DetectionResult[] {
+    const out: DetectionResult[] = [];
     for (const component in repo) {
       if (!Object.prototype.hasOwnProperty.call(repo, component)) continue;
-      const exRoot = repo[component].extractors || {};
+      const library = repo[component];
+      if (!library) continue;
+      const exRoot = library.extractors || {};
       const hashes = exRoot.hashes;
       if (!isDefined(hashes)) continue;
       if (Object.prototype.hasOwnProperty.call(hashes, hash)) {
+        const version = hashes[hash];
+        if (!version) continue;
         out.push({
-          version: hashes[hash],
+          version,
           component,
           detection: "hash",
         });
@@ -117,15 +243,18 @@ export function init(sdk) {
     return out;
   }
 
-  function toComparable(n) {
+  function toComparable(n: string | number | undefined): string | number {
     if (!isDefined(n)) return 0;
     if (String(n).match(/^[0-9]+$/)) {
-      return parseInt(n, 10);
+      return parseInt(String(n), 10);
     }
     return n;
   }
 
-  function isAtOrAbove(version1, version2) {
+  function isAtOrAbove(
+    version1: string | number,
+    version2: string | number,
+  ): boolean {
     const v1 = String(version1).split(/[.\-]/g);
     const v2 = String(version2).split(/[.\-]/g);
     const l = v1.length > v2.length ? v1.length : v2.length;
@@ -143,9 +272,13 @@ export function init(sdk) {
     return true;
   }
 
-  function check(results, repo) {
+  function check(
+    results: DetectionResult[],
+    repo: RetireRepo,
+  ): DetectionResult[] {
     for (let r = 0; r < results.length; r++) {
       const result = results[r];
+      if (!result) continue;
       const entry = repo[result.component];
       if (!entry) continue;
 
@@ -154,13 +287,17 @@ export function init(sdk) {
 
       for (let i = 0; i < vulns.length; i++) {
         const v = vulns[i];
+        if (!v) continue;
 
         if (!isDefined(v.below) || !isAtOrAbove(result.version, v.below)) {
-          if (isDefined(v.atOrAbove) && !isAtOrAbove(result.version, v.atOrAbove)) {
+          if (
+            isDefined(v.atOrAbove) &&
+            !isAtOrAbove(result.version, v.atOrAbove)
+          ) {
             continue;
           }
 
-          const vulnerability = {
+          const vulnerability: RetireVulnerability = {
             info: v.info,
             below: v.below,
             atOrAbove: v.atOrAbove,
@@ -177,22 +314,28 @@ export function init(sdk) {
     return results;
   }
 
-  function scanUri(uri, repo) {
+  function scanUri(uri: string, repo: RetireRepo): DetectionResult[] {
     const result = scan(uri, "uri", repo);
     return check(result, repo);
   }
 
-  function scanFileName(fileName, repo, includeUri) {
+  function scanFileName(
+    fileName: string,
+    repo: RetireRepo,
+    includeUri?: boolean,
+  ): DetectionResult[] {
     let result = scan(fileName, "filename", repo, splitAndMatchAll(/[\/\\]/));
     if (includeUri) {
-      result = result.concat(
-        scan(fileName.replace(/\\/g, "/"), "uri", repo)
-      );
+      result = result.concat(scan(fileName.replace(/\\/g, "/"), "uri", repo));
     }
     return check(result, repo);
   }
 
-  function scanFileContent(content, repo, hasher) {
+  function scanFileContent(
+    content: string,
+    repo: RetireRepo,
+    hasher?: HashProvider,
+  ): DetectionResult[] {
     const normalizedContent = content.toString().replace(/(\r\n|\r)/g, "\n");
     let result = scan(normalizedContent, "filecontent", repo);
     if (result.length === 0) {
@@ -200,7 +343,7 @@ export function init(sdk) {
         normalizedContent,
         "filecontentreplace",
         repo,
-        replacementMatch
+        replacementMatch,
       );
     }
     if (result.length === 0 && hasher && hasher.sha1) {
@@ -209,13 +352,17 @@ export function init(sdk) {
     return check(result, repo);
   }
 
-  function highestSeverity(vulns) {
-    const order = { low: 1, medium: 2, high: 3 };
-    let best = "low";
+  function highestSeverity(vulns?: RetireVulnerability[]): SeverityLabel {
+    const order: Record<SeverityLabel, number> = { low: 1, medium: 2, high: 3 };
+    let best: SeverityLabel = "low";
     let score = 0;
     for (const v of vulns || []) {
-      const sev = (v.severity || "low").toLowerCase();
-      const s = order[sev] || 1;
+      const sevRaw = (v.severity || "low").toLowerCase();
+      const sev: SeverityLabel =
+        sevRaw === "high" || sevRaw === "medium" || sevRaw === "low"
+          ? (sevRaw as SeverityLabel)
+          : "low";
+      const s = order[sev];
       if (s > score) {
         score = s;
         best = sev;
@@ -228,40 +375,39 @@ export function init(sdk) {
   // === Live scanning state ===
   //
 
- let liveRepo = null;
+  let liveRepo: RetireRepo | null = null;
   let liveEnabled = false;
   let liveInScopeOnly = true;
 
-function mergeResultsByUrl(rawResults) {
-  const byUrl = new Map();
+  function mergeResultsByUrl(rawResults: ScanResultEntry[]): ScanResultEntry[] {
+    const byUrl = new Map<string, ScanResultEntry>();
 
-  for (const entry of rawResults) {
-    if (!entry || !entry.url) continue;
-    const url = entry.url;
-    let existing = byUrl.get(url);
+    for (const entry of rawResults) {
+      if (!entry || !entry.url) continue;
+      const url = entry.url;
+      let existing = byUrl.get(url);
 
-    if (!existing) {
-      existing = { url, findings: [] };
-      byUrl.set(url, existing);
-    }
+      if (!existing) {
+        existing = { url, findings: [] };
+        byUrl.set(url, existing);
+      }
 
-    for (const f of entry.findings || []) {
-      const already = existing.findings.some(
-        (ef) =>
-          ef.libName === f.libName &&
-          ef.version === f.version &&
-          (ef.severity || "").toLowerCase() ===
-            (f.severity || "").toLowerCase()
-      );
-      if (!already) {
-        existing.findings.push(f);
+      for (const f of entry.findings || []) {
+        const already = existing.findings.some(
+          (ef) =>
+            ef.libName === f.libName &&
+            ef.version === f.version &&
+            (ef.severity || "").toLowerCase() ===
+              (f.severity || "").toLowerCase(),
+        );
+        if (!already) {
+          existing.findings.push(f);
+        }
       }
     }
+
+    return Array.from(byUrl.values());
   }
-
-  return Array.from(byUrl.values());
-}
-
 
   //
   // === Batch scanner API ===
@@ -269,14 +415,16 @@ function mergeResultsByUrl(rawResults) {
 
   sdk.api.register(
     "scanCapturedJavaScript",
-    async (_callSdk, repo, options) => {
-      options = options || {};
+    async (
+      _callSdk: SDK<RetireAPI>,
+      repo: RetireRepo,
+      options?: ScanCapturedOptions,
+    ) => {
+      const opts = options ?? {};
       const limit =
-        typeof options.limit === "number" && options.limit >= 0
-          ? options.limit
-          : 100;
-      const inScopeOnly = !!options.inScopeOnly;
-      const autoCreateFindings = !!options.autoCreateFindings;
+        typeof opts.limit === "number" && opts.limit >= 0 ? opts.limit : 100;
+      const inScopeOnly = !!opts.inScopeOnly;
+      const autoCreateFindings = !!opts.autoCreateFindings;
 
       if (!repo || typeof repo !== "object") {
         return {
@@ -285,20 +433,17 @@ function mergeResultsByUrl(rawResults) {
         };
       }
 
-      const rawResults = [];
-      //const processedFindingKeys = new Set();
+      const rawResults: ScanResultEntry[] = [];
 
       let fetched = 0;
-      let cursor = undefined;
+      let cursor: string | undefined;
       const batchSize = 100;
 
       while (limit === 0 || fetched < limit) {
         const toFetch =
           limit === 0 ? batchSize : Math.min(batchSize, limit - fetched);
 
-        let q = sdk.requests
-          .query()
-          .descending("req", "created_at");
+        let q = sdk.requests.query().descending("req", "created_at");
 
         if (cursor) {
           q = q.after(cursor);
@@ -309,7 +454,6 @@ function mergeResultsByUrl(rawResults) {
         if (items.length === 0) {
           break; // no more history
         }
-
         for (const item of items) {
           const request = item.request;
           const response = item.response;
@@ -323,13 +467,12 @@ function mergeResultsByUrl(rawResults) {
             }
           }
 
-          const reqUrl = request && request.getUrl ? request.getUrl() : "";
-          const respUrl =
-            response && response.getUrl ? response.getUrl() : reqUrl;
+          const reqLike = request as RequestLike | undefined;
+          const respLike = response as RequestLike | undefined;
+          const reqUrl = reqLike?.getUrl?.() ?? "";
+          const respUrl = respLike?.getUrl?.() ?? reqUrl;
 
-          const headers = response.getHeaders
-            ? response.getHeaders()
-            : {};
+          const headers = response.getHeaders ? response.getHeaders() : {};
           const ct =
             (headers["Content-Type"] && headers["Content-Type"][0]) ||
             (headers["content-type"] && headers["content-type"][0]) ||
@@ -346,9 +489,8 @@ function mergeResultsByUrl(rawResults) {
 
           const bodyObj = response.getBody ? response.getBody() : null;
           const bodyText = bodyObj ? await bodyObj.toText() : "";
-
           const urlForDisplay = respUrl || reqUrl || "(unknown)";
-          const detections = [];
+          const detections: DetectionResult[] = [];
 
           // Retire.js-style detection: URL, filename, body
           detections.push(...scanUri(urlForDisplay, repo));
@@ -360,9 +502,8 @@ function mergeResultsByUrl(rawResults) {
           if (detections.length === 0) {
             continue;
           }
-
           // Aggregate per library+version for this request/response
-          const perLibMap = new Map();
+          const perLibMap = new Map<string, PerLibAccumulation>();
           for (const det of detections) {
             if (!det.vulnerabilities || det.vulnerabilities.length === 0) {
               continue;
@@ -372,37 +513,38 @@ function mergeResultsByUrl(rawResults) {
               perLibMap.set(key, {
                 libName: det.component,
                 version: det.version,
-                vulns: [], 
+                vulns: [],
               });
             }
             const rec = perLibMap.get(key);
+            if (!rec) continue;
             for (const v of det.vulnerabilities) {
               rec.vulns.push({ v, detection: det.detection });
             }
           }
 
-          const findings = [];
+          const findings: RetireFinding[] = [];
           for (const [, rec] of perLibMap.entries()) {
             const allVulnObjs = rec.vulns.map((x) => x.v);
             const severity = highestSeverity(allVulnObjs);
 
-            const vulnDetails = [];
-            const allRefsSet = new Set();
-            let minBelow = null;
-            let minAtOrAbove = null;
+            const vulnDetails: VulnDetail[] = [];
+            const allRefsSet = new Set<string>();
+            let minBelow: string | null = null;
+            let minAtOrAbove: string | null = null;
 
             for (const { v } of rec.vulns) {
               const infoArr = Array.isArray(v.info)
                 ? v.info
                 : v.info
-                ? [v.info]
-                : [];
+                  ? [v.info]
+                  : [];
 
               const urlRefs = infoArr.filter((s) =>
-                /^https?:\/\//i.test(String(s))
+                /^https?:\/\//i.test(String(s)),
               );
               const nonUrlInfo = infoArr.filter(
-                (s) => !/^https?:\/\//i.test(String(s))
+                (s) => !/^https?:\/\//i.test(String(s)),
               );
 
               urlRefs.forEach((u) => allRefsSet.add(u));
@@ -438,7 +580,7 @@ function mergeResultsByUrl(rawResults) {
             const refsAll = Array.from(allRefsSet);
             const reason = `Detected via RetireJS pattern matching.`;
 
-            const findingRecord = {
+            const findingRecord: RetireFinding = {
               libName: rec.libName,
               version: rec.version,
               severity,
@@ -453,93 +595,97 @@ function mergeResultsByUrl(rawResults) {
             findings.push(findingRecord);
 
             // === Auto-create Caido Finding (batch mode) ===
-if (autoCreateFindings && sdk.findings && sdk.findings.create) {
-  try {
-    const dedupeKey = makeDedupeKey("manual", request, rec.libName, rec.version);
+            if (autoCreateFindings && sdk.findings && sdk.findings.create) {
+              try {
+                const dedupeKey = makeDedupeKey(
+                  "manual",
+                  request,
+                  rec.libName,
+                  rec.version,
+                );
 
-    let exists = false;
+                let exists = false;
 
-    if (sdk.findings.exists) {
-      try {
-        exists = await sdk.findings.exists(dedupeKey);
-      } catch {
-        exists = false;
-      }
-    }
+                if (sdk.findings.exists) {
+                  try {
+                    exists = await sdk.findings.exists(dedupeKey);
+                  } catch {
+                    exists = false;
+                  }
+                }
 
-    if (!exists && processedFindingKeys.has(dedupeKey)) {
-      exists = true;
-    }
+                if (!exists && processedFindingKeys.has(dedupeKey)) {
+                  exists = true;
+                }
 
-    if (!exists) {
-      processedFindingKeys.add(dedupeKey);
+                if (!exists) {
+                  processedFindingKeys.add(dedupeKey);
 
-      const lines: string[] = [];
-      lines.push(
-        `Detected ${rec.libName} v${rec.version} with known vulnerabilities via RetireJS pattern matching.`
-      );
-      lines.push("");
-      lines.push("Vulnerabilities:");
-      for (const vd of vulnDetails) {
-        lines.push(`- ${vd.summary}`);
-      }
+                  const lines: string[] = [];
+                  lines.push(
+                    `Detected ${rec.libName} v${rec.version} with known vulnerabilities via RetireJS pattern matching.`,
+                  );
+                  lines.push("");
+                  lines.push("Vulnerabilities:");
+                  for (const vd of vulnDetails) {
+                    lines.push(`- ${vd.summary}`);
+                  }
 
-      let remediation = "";
-      if (minBelow) {
-        remediation = `Upgrade ${rec.libName} to at least v${minBelow} (or the latest stable release) to address these issues.`;
-      } else if (minAtOrAbove) {
-        remediation = `Upgrade ${rec.libName} to a version newer than v${minAtOrAbove} (ideally the latest stable release) to reduce risk.`;
-      } else {
-        remediation = `Review the references and upgrade to the latest stable version of ${rec.libName} where possible.`;
-      }
+                  let remediation = "";
+                  if (minBelow) {
+                    remediation = `Upgrade ${rec.libName} to at least v${minBelow} (or the latest stable release) to address these issues.`;
+                  } else if (minAtOrAbove) {
+                    remediation = `Upgrade ${rec.libName} to a version newer than v${minAtOrAbove} (ideally the latest stable release) to reduce risk.`;
+                  } else {
+                    remediation = `Review the references and upgrade to the latest stable version of ${rec.libName} where possible.`;
+                  }
 
-      lines.push("");
-      lines.push("Remediation:");
-      lines.push(`- ${remediation}`);
+                  lines.push("");
+                  lines.push("Remediation:");
+                  lines.push(`- ${remediation}`);
 
-      lines.push("");
-      lines.push("Context:");
-      lines.push(`- URL: ${urlForDisplay}`);
-      if (request && request.getId) {
-        lines.push(`- Request ID: ${request.getId()}`);
-      }
-      if (response && response.getCode) {
-        lines.push(`- Response code: ${response.getCode()}`);
-      }
+                  lines.push("");
+                  lines.push("Context:");
+                  lines.push(`- URL: ${urlForDisplay}`);
+                  if (request && request.getId) {
+                    lines.push(`- Request ID: ${request.getId()}`);
+                  }
+                  if (response && response.getCode) {
+                    lines.push(`- Response code: ${response.getCode()}`);
+                  }
 
-      if (refsAll.length > 0) {
-        lines.push("");
-        lines.push("References:");
-        for (const u of refsAll) {
-          lines.push(`- ${u}`);
-        }
-      }
+                  if (refsAll.length > 0) {
+                    lines.push("");
+                    lines.push("References:");
+                    for (const u of refsAll) {
+                      lines.push(`- ${u}`);
+                    }
+                  }
 
-      await sdk.findings.create({
-        title: `${rec.libName} v${rec.version} - ${severity.toUpperCase()}`,
-        description: lines.join("\n"),
-        reporter: "RetireJS (Manual)",
-        request,
-        dedupeKey,
-      });
-    }
-  } catch (err) {
-    sdk.console &&
-      sdk.console.error &&
-      sdk.console.error(
-        `RetireJS plugin: error creating batch finding: ${err}`
-      );
-  }
-}
-
+                  await sdk.findings.create({
+                    title: `${rec.libName} v${rec.version} - ${severity.toUpperCase()}`,
+                    description: lines.join("\n"),
+                    reporter: "RetireJS (Manual)",
+                    request,
+                    dedupeKey,
+                  });
+                }
+              } catch (err) {
+                sdk.console &&
+                  sdk.console.error &&
+                  sdk.console.error(
+                    `RetireJS plugin: error creating batch finding: ${err}`,
+                  );
+              }
+            }
           }
 
           if (findings.length > 0) {
-  rawResults.push({
-    url: urlForDisplay,
-    findings,
-  });
-}
+            rawResults.push({
+              url: urlForDisplay,
+              findings,
+            });
+          }
         }
 
         fetched += items.length;
@@ -560,258 +706,268 @@ if (autoCreateFindings && sdk.findings && sdk.findings.create) {
       }
 
       /// --- Deduplicate results by URL ---
-const results = mergeResultsByUrl(rawResults);
+      const results = mergeResultsByUrl(rawResults);
 
-let high = 0,
-  medium = 0,
-  low = 0;
-const order = { low: 0, medium: 1, high: 2 };
+      let high = 0,
+        medium = 0,
+        low = 0;
+      const order: Record<SeverityLabel, number> = {
+        low: 0,
+        medium: 1,
+        high: 2,
+      };
 
-for (const r of results) {
-  let maxSev = "low";
-  for (const f of r.findings) {
-    const sev = (f.severity || "low").toLowerCase();
-    if (order[sev] > order[maxSev]) maxSev = sev;
-  }
-  if (maxSev === "high") high++;
-  else if (maxSev === "medium") medium++;
-  else low++;
-}
+      for (const r of results) {
+        let maxSev: SeverityLabel = "low";
+        for (const f of r.findings) {
+          const sev = f.severity;
+          if (order[sev] > order[maxSev]) maxSev = sev;
+        }
+        if (maxSev === "high") high++;
+        else if (maxSev === "medium") medium++;
+        else low++;
+      }
 
-return {
-  results,
-  counts: {
-    scanned: fetched,       
-    files: results.length,   
-    high,
-    medium,
-    low,
-  },
-};
-
-    }
+      return {
+        results,
+        counts: {
+          scanned: fetched,
+          files: results.length,
+          high,
+          medium,
+          low,
+        },
+      };
+    },
   );
 
   //
-  //  Toggle live scanning (called from frontend) 
+  //  Toggle live scanning (called from frontend)
   //
 
   sdk.api.register(
     "toggleLiveScanning",
-    async (_callSdk, repo, enabled, inScopeOnly) => {
+    async (
+      _callSdk: SDK<RetireAPI>,
+      repo: RetireRepo,
+      enabled?: boolean,
+      inScopeOnly?: boolean,
+    ): Promise<ToggleState> => {
       if (repo && typeof repo === "object") {
         liveRepo = repo;
       }
       liveEnabled = !!enabled;
       liveInScopeOnly = !!inScopeOnly;
       return { enabled: liveEnabled };
-    }
+    },
   );
 
   //
-  //  Live scanner: runs on every intercepted response when enabled 
+  //  Live scanner: runs on every intercepted response when enabled
   //
 
-  sdk.events.onInterceptResponse(
-    async (callSdk, request, response) => {
-      try {
-        if (!liveEnabled || !liveRepo) return;
+  sdk.events.onInterceptResponse(async (callSdk, request, response) => {
+    try {
+      if (!liveEnabled || !liveRepo) return;
 
-        // Only in-scope if configured
-        if (liveInScopeOnly && callSdk.requests && callSdk.requests.inScope) {
-          try {
-            if (!callSdk.requests.inScope(request)) return;
-          } catch {
-            // if inScope throws, fall back to scanning everything
-          }
+      // Only in-scope if configured
+      if (liveInScopeOnly && callSdk.requests && callSdk.requests.inScope) {
+        try {
+          if (!callSdk.requests.inScope(request)) return;
+        } catch {
+          // if inScope throws, fall back to scanning everything
         }
+      }
 
-        const reqUrl = request && request.getUrl ? request.getUrl() : "";
-        const respUrl =
-          response && response.getUrl ? response.getUrl() : reqUrl;
+      const reqLike = request as RequestLike | undefined;
+      const respLike = response as RequestLike | undefined;
+      const reqUrl = reqLike?.getUrl?.() ?? "";
+      const respUrl = respLike?.getUrl?.() ?? reqUrl;
 
-        const headers = response.getHeaders
-          ? response.getHeaders()
-          : {};
-        const ct =
-          (headers["Content-Type"] && headers["Content-Type"][0]) ||
-          (headers["content-type"] && headers["content-type"][0]) ||
-          "";
-        const ctLower = ct.toLowerCase();
+      const headers = response.getHeaders ? response.getHeaders() : {};
+      const ct =
+        (headers["Content-Type"] && headers["Content-Type"][0]) ||
+        (headers["content-type"] && headers["content-type"][0]) ||
+        "";
+      const ctLower = ct.toLowerCase();
 
-        if (
-          !ctLower.includes("javascript") &&
-          !respUrl.toLowerCase().endsWith(".js") &&
-          !reqUrl.toLowerCase().endsWith(".js")
-        ) {
-          return;
+      if (
+        !ctLower.includes("javascript") &&
+        !respUrl.toLowerCase().endsWith(".js") &&
+        !reqUrl.toLowerCase().endsWith(".js")
+      ) {
+        return;
+      }
+
+      const bodyObj = response.getBody ? response.getBody() : null;
+      const bodyText = bodyObj ? await bodyObj.toText() : "";
+
+      const urlForDisplay = respUrl || reqUrl || "(unknown)";
+      const detections: DetectionResult[] = [];
+
+      detections.push(...scanUri(urlForDisplay, liveRepo));
+      detections.push(...scanFileName(urlForDisplay, liveRepo, true));
+      if (bodyText && bodyText.length) {
+        detections.push(...scanFileContent(bodyText, liveRepo));
+      }
+
+      if (detections.length === 0) return;
+
+      const perLibMap = new Map<string, PerLibAccumulation>();
+      for (const det of detections) {
+        if (!det.vulnerabilities || det.vulnerabilities.length === 0) {
+          continue;
         }
-
-        const bodyObj = response.getBody ? response.getBody() : null;
-        const bodyText = bodyObj ? await bodyObj.toText() : "";
-
-        const urlForDisplay = respUrl || reqUrl || "(unknown)";
-        const detections = [];
-
-        detections.push(...scanUri(urlForDisplay, liveRepo));
-        detections.push(...scanFileName(urlForDisplay, liveRepo, true));
-        if (bodyText && bodyText.length) {
-          detections.push(...scanFileContent(bodyText, liveRepo));
+        const key = det.component + "|" + det.version;
+        if (!perLibMap.has(key)) {
+          perLibMap.set(key, {
+            libName: det.component,
+            version: det.version,
+            vulns: [],
+          });
         }
-
-        if (detections.length === 0) return;
-
-        const perLibMap = new Map();
-        for (const det of detections) {
-          if (!det.vulnerabilities || det.vulnerabilities.length === 0) {
-            continue;
-          }
-          const key = det.component + "|" + det.version;
-          if (!perLibMap.has(key)) {
-            perLibMap.set(key, {
-              libName: det.component,
-              version: det.version,
-              vulns: [],
-            });
-          }
-          const rec = perLibMap.get(key);
-          for (const v of det.vulnerabilities) {
-            rec.vulns.push({ v, detection: det.detection });
-          }
+        const rec = perLibMap.get(key);
+        if (!rec) continue;
+        for (const v of det.vulnerabilities) {
+          rec.vulns.push({ v, detection: det.detection });
         }
+      }
 
-        for (const [, rec] of perLibMap.entries()) {
-          const allVulnObjs = rec.vulns.map((x) => x.v);
-          const severity = highestSeverity(allVulnObjs);
+      for (const [, rec] of perLibMap.entries()) {
+        const allVulnObjs = rec.vulns.map((x) => x.v);
+        const severity = highestSeverity(allVulnObjs);
 
-          const vulnDetails = [];
-          const allRefsSet = new Set();
-          let minBelow = null;
-          let minAtOrAbove = null;
+        const vulnDetails: VulnDetail[] = [];
+        const allRefsSet = new Set<string>();
+        let minBelow: string | null = null;
+        let minAtOrAbove: string | null = null;
 
-          for (const { v } of rec.vulns) {
-            const infoArr = Array.isArray(v.info)
-              ? v.info
-              : v.info
+        for (const { v } of rec.vulns) {
+          const infoArr = Array.isArray(v.info)
+            ? v.info
+            : v.info
               ? [v.info]
               : [];
 
-            const urlRefs = infoArr.filter((s) =>
-              /^https?:\/\//i.test(String(s))
-            );
-            const nonUrlInfo = infoArr.filter(
-              (s) => !/^https?:\/\//i.test(String(s))
-            );
+          const urlRefs = infoArr.filter((s) =>
+            /^https?:\/\//i.test(String(s)),
+          );
+          const nonUrlInfo = infoArr.filter(
+            (s) => !/^https?:\/\//i.test(String(s)),
+          );
 
-            urlRefs.forEach((u) => allRefsSet.add(u));
+          urlRefs.forEach((u) => allRefsSet.add(u));
 
-            const sevLabel = (v.severity || severity || "low").toUpperCase();
-            const belowStr = v.below ? ` (< ${v.below})` : "";
-            const atOrAboveStr = v.atOrAbove ? ` (>= ${v.atOrAbove})` : "";
-            const baseSummary =
-              nonUrlInfo[0] || urlRefs[0] || "Known vulnerability";
+          const sevLabel = (v.severity || severity || "low").toUpperCase();
+          const belowStr = v.below ? ` (< ${v.below})` : "";
+          const atOrAboveStr = v.atOrAbove ? ` (>= ${v.atOrAbove})` : "";
+          const baseSummary =
+            nonUrlInfo[0] || urlRefs[0] || "Known vulnerability";
 
-            const summary = `${sevLabel}: ${baseSummary}${belowStr}${atOrAboveStr}`;
+          const summary = `${sevLabel}: ${baseSummary}${belowStr}${atOrAboveStr}`;
 
-            if (v.below) {
-              if (!minBelow || isAtOrAbove(minBelow, v.below)) {
-                minBelow = v.below;
-              }
+          if (v.below) {
+            if (!minBelow || isAtOrAbove(minBelow, v.below)) {
+              minBelow = v.below;
             }
-            if (v.atOrAbove) {
-              if (!minAtOrAbove || isAtOrAbove(minAtOrAbove, v.atOrAbove)) {
-                minAtOrAbove = v.atOrAbove;
-              }
+          }
+          if (v.atOrAbove) {
+            if (!minAtOrAbove || isAtOrAbove(minAtOrAbove, v.atOrAbove)) {
+              minAtOrAbove = v.atOrAbove;
             }
-
-            vulnDetails.push({
-              summary,
-              severity: v.severity || severity,
-              refs: urlRefs,
-              below: v.below || null,
-              atOrAbove: v.atOrAbove || null,
-            });
           }
 
-          const refsAll = Array.from(allRefsSet);
+          vulnDetails.push({
+            summary,
+            severity: v.severity || severity,
+            refs: urlRefs,
+            below: v.below || null,
+            atOrAbove: v.atOrAbove || null,
+          });
+        }
 
-          if (callSdk.findings && callSdk.findings.create) {
-  try {
-    // One live finding per host+path+lib+version per plugin session
-    const dedupeKey = makeDedupeKey("live", request, rec.libName, rec.version);
+        const refsAll = Array.from(allRefsSet);
 
-    if (processedFindingKeys.has(dedupeKey)) {
-      // We already created a live finding for this exact host/path/lib/version
-      continue; // move to next library in perLibMap
-    }
+        if (callSdk.findings && callSdk.findings.create) {
+          try {
+            // One live finding per host+path+lib+version per plugin session
+            const dedupeKey = makeDedupeKey(
+              "live",
+              request,
+              rec.libName,
+              rec.version,
+            );
 
-    processedFindingKeys.add(dedupeKey);
+            if (processedFindingKeys.has(dedupeKey)) {
+              // We already created a live finding for this exact host/path/lib/version
+              continue; // move to next library in perLibMap
+            }
 
-    const lines: string[] = [];
-    lines.push(
-      `Detected ${rec.libName} v${rec.version} with known vulnerabilities via RetireJS (live scan).`
-    );
-    lines.push("");
-    lines.push("Vulnerabilities:");
-    for (const vd of vulnDetails) {
-      lines.push(`- ${vd.summary}`);
-    }
+            processedFindingKeys.add(dedupeKey);
 
-    let remediation = "";
-    if (minBelow) {
-      remediation = `Upgrade ${rec.libName} to at least v${minBelow} (or the latest stable release) to address these issues.`;
-    } else if (minAtOrAbove) {
-      remediation = `Upgrade ${rec.libName} to a version newer than v${minAtOrAbove} (ideally the latest stable release) to reduce risk.`;
-    } else {
-      remediation = `Review the references and upgrade to the latest stable version of ${rec.libName} where possible.`;
-    }
+            const lines: string[] = [];
+            lines.push(
+              `Detected ${rec.libName} v${rec.version} with known vulnerabilities via RetireJS (live scan).`,
+            );
+            lines.push("");
+            lines.push("Vulnerabilities:");
+            for (const vd of vulnDetails) {
+              lines.push(`- ${vd.summary}`);
+            }
 
-    lines.push("");
-    lines.push("Remediation:");
-    lines.push(`- ${remediation}`);
+            let remediation = "";
+            if (minBelow) {
+              remediation = `Upgrade ${rec.libName} to at least v${minBelow} (or the latest stable release) to address these issues.`;
+            } else if (minAtOrAbove) {
+              remediation = `Upgrade ${rec.libName} to a version newer than v${minAtOrAbove} (ideally the latest stable release) to reduce risk.`;
+            } else {
+              remediation = `Review the references and upgrade to the latest stable version of ${rec.libName} where possible.`;
+            }
 
-    lines.push("");
-    lines.push("Context:");
-    lines.push(`- URL: ${urlForDisplay}`);
-    if (request && request.getId) {
-      lines.push(`- Request ID: ${request.getId()}`);
-    }
-    if (response && response.getCode) {
-      lines.push(`- Response code: ${response.getCode()}`);
-    }
+            lines.push("");
+            lines.push("Remediation:");
+            lines.push(`- ${remediation}`);
 
-    if (refsAll.length > 0) {
-      lines.push("");
-      lines.push("References:");
-      for (const u of refsAll) {
-        lines.push(`- ${u}`);
+            lines.push("");
+            lines.push("Context:");
+            lines.push(`- URL: ${urlForDisplay}`);
+            if (request && request.getId) {
+              lines.push(`- Request ID: ${request.getId()}`);
+            }
+            if (response && response.getCode) {
+              lines.push(`- Response code: ${response.getCode()}`);
+            }
+
+            if (refsAll.length > 0) {
+              lines.push("");
+              lines.push("References:");
+              for (const u of refsAll) {
+                lines.push(`- ${u}`);
+              }
+            }
+
+            await callSdk.findings.create({
+              title: `${rec.libName} v${rec.version} - ${severity.toUpperCase()}`,
+              description: lines.join("\n"),
+              reporter: "RetireJS (Live)",
+              request,
+              dedupeKey,
+            });
+          } catch (err) {
+            callSdk.console &&
+              callSdk.console.error &&
+              callSdk.console.error(
+                `RetireJS plugin: error creating live finding: ${err}`,
+              );
+          }
+        }
       }
+    } catch (err) {
+      sdk.console &&
+        sdk.console.error &&
+        sdk.console.error(
+          `RetireJS plugin: live scanner error: ${String(err)}`,
+        );
     }
-
-    await callSdk.findings.create({
-      title: `${rec.libName} v${rec.version} - ${severity.toUpperCase()}`,
-      description: lines.join("\n"),
-      reporter: "RetireJS (Live)",
-      request,
-      dedupeKey,
-    });
-  } catch (err) {
-    callSdk.console &&
-      callSdk.console.error &&
-      callSdk.console.error(
-        `RetireJS plugin: error creating live finding: ${err}`
-      );
-  }
-}
-
-        }
-      } catch (err) {
-        sdk.console &&
-          sdk.console.error &&
-          sdk.console.error(
-            `RetireJS plugin: live scanner error: ${String(err)}`
-          );
-        }
-    }
-  );
+  });
 }

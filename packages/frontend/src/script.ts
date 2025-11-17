@@ -1,4 +1,96 @@
-export const init = async (sdk) => {
+import type { FrontendSDK } from "./types";
+
+type SeverityLabel = "low" | "medium" | "high";
+
+interface Preferences {
+  autoExpandHighs: boolean;
+  autoCreateFindings: boolean;
+  showSummaries: boolean;
+  limit: number;
+  inScopeOnly: boolean;
+  query: string;
+}
+
+type ScanOptions = Parameters<
+  FrontendSDK["backend"]["scanCapturedJavaScript"]
+>[1];
+
+type BackendRepo = Parameters<
+  FrontendSDK["backend"]["scanCapturedJavaScript"]
+>[0];
+
+type ScanResponse = Awaited<
+  ReturnType<FrontendSDK["backend"]["scanCapturedJavaScript"]>
+>;
+
+type ScanResultEntry = ScanResponse["results"][number];
+type RetireFinding = ScanResultEntry["findings"][number];
+type BackendVulnDetail =
+  RetireFinding["vulnDetails"] extends Array<infer Item> ? Item : never;
+type FallbackVulnSummary =
+  RetireFinding["vulns"] extends Array<infer Item> ? Item : string;
+
+interface NormalizedVulnDetail {
+  summary: string;
+  severity: SeverityLabel;
+  refs: string[];
+  below: string | null;
+  atOrAbove: string | null;
+}
+
+const severityRank: Record<SeverityLabel, number> = {
+  low: 1,
+  medium: 2,
+  high: 3,
+};
+
+const normalizeSeverity = (value?: string | null): SeverityLabel => {
+  const normalized = (value || "low").toLowerCase();
+  if (normalized === "high" || normalized === "medium") {
+    return normalized;
+  }
+  return "low";
+};
+
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return typeof error === "string" ? error : JSON.stringify(error);
+};
+
+const sanitizeRefs = (refs?: unknown[]): string[] => {
+  if (!Array.isArray(refs)) return [];
+  return refs
+    .filter((item): item is string => typeof item === "string" && !!item.length)
+    .map((item) => item.trim());
+};
+
+const normalizeVulnDetails = (
+  finding: RetireFinding,
+): NormalizedVulnDetail[] => {
+  const rawDetails = finding.vulnDetails as BackendVulnDetail[] | undefined;
+  if (Array.isArray(rawDetails) && rawDetails.length > 0) {
+    return rawDetails.map((vd: BackendVulnDetail) => ({
+      summary: vd.summary,
+      severity: normalizeSeverity(vd.severity || finding.severity),
+      refs: sanitizeRefs(vd.refs),
+      below: vd.below ?? null,
+      atOrAbove: vd.atOrAbove ?? null,
+    }));
+  }
+
+  const summaries = Array.isArray(finding.vulns) ? finding.vulns : [];
+  return summaries.map((summary: FallbackVulnSummary) => ({
+    summary: String(summary),
+    severity: normalizeSeverity(finding.severity),
+    refs: [],
+    below: null,
+    atOrAbove: null,
+  }));
+};
+
+export const init = async (sdk: FrontendSDK): Promise<void> => {
   const RETIRE_DB_URL =
     "https://raw.githubusercontent.com/RetireJS/retire.js/master/repository/jsrepository.json";
 
@@ -6,7 +98,10 @@ export const init = async (sdk) => {
   // Helpers
   //
 
-  function compareVersions(a, b) {
+  function compareVersions(
+    a?: string | number | null,
+    b?: string | number | null,
+  ): number {
     if (!a || !b) return 0;
     const pa = String(a)
       .split(/[^0-9a-zA-Z]+/)
@@ -26,9 +121,11 @@ export const init = async (sdk) => {
     return 0;
   }
 
-  function getPrefs() {
-    const stored = sdk.storage.get();
-    const defaults = {
+  let cachedRepo: BackendRepo | null = null;
+
+  function getPrefs(): Preferences {
+    const stored = sdk.storage.get() as Partial<Preferences> | undefined;
+    const defaults: Preferences = {
       autoExpandHighs: true,
       autoCreateFindings: false,
       showSummaries: true,
@@ -40,54 +137,51 @@ export const init = async (sdk) => {
     return { ...defaults, ...stored };
   }
 
-  async function savePrefs(next) {
-    const existing = sdk.storage.get() || {};
+  async function savePrefs(next: Partial<Preferences>): Promise<void> {
+    const existing =
+      (sdk.storage.get() as Partial<Preferences> | undefined) || {};
     await sdk.storage.set({ ...existing, ...next });
   }
 
-  async function loadDb(force = false) {
-    const cached = sdk.storage.get();
-    if (cached && cached.__db && !force) return cached.__db;
+  async function loadDb(force = false): Promise<BackendRepo> {
+    if (cachedRepo && !force) return cachedRepo;
 
     const res = await fetch(RETIRE_DB_URL);
     if (!res.ok) throw new Error("Failed to fetch Retire.js DB");
-    const db = await res.json();
-
-    const prefs = getPrefs();
-    await sdk.storage.set({ ...prefs, __db: db });
+    const db = (await res.json()) as BackendRepo;
+    cachedRepo = db;
     return db;
   }
 
-  function severityIcon(sev) {
-    if (sev === "high") return "🔥";
-    if (sev === "medium") return "⚠️";
-    if (sev === "low") return "ℹ️";
+  function severityIcon(sev: SeverityLabel | string): string {
+    const normalized = normalizeSeverity(sev);
+    if (normalized === "high") return "🔥";
+    if (normalized === "medium") return "⚠️";
+    if (normalized === "low") return "ℹ️";
     return "🧱";
   }
 
-  function highestSeverity(findings) {
-    let hasHigh = false,
-      hasMed = false;
+  function highestSeverity(findings: RetireFinding[]): SeverityLabel {
+    let hasHigh = false;
+    let hasMed = false;
     for (const f of findings) {
-      const sev = (f.severity || "").toLowerCase();
+      const sev = normalizeSeverity(f.severity);
       if (sev === "high") hasHigh = true;
       else if (sev === "medium") hasMed = true;
     }
     return hasHigh ? "high" : hasMed ? "medium" : "low";
   }
 
-
   //
   // UI skeleton
   //
 
-
   const root = document.createElement("div");
   Object.assign(root.style, { height: "100%", width: "100%" });
-  root.id = "plugin--frontend-vue";
+  root.id = "plugin--retire-js";
 
   const panel = document.createElement("div");
-  panel.id = "retirejs-panel"; 
+  panel.id = "retirejs-panel";
 
   root.innerHTML = `
     <div class="toolbar">
@@ -129,25 +223,33 @@ export const init = async (sdk) => {
   // DOM refs
   //
 
-  const resultsEl = root.querySelector("#results");
-  const summaryEl = root.querySelector("#summary");
-  const searchEl = root.querySelector("#search");
+  const getElement = <T extends Element>(selector: string): T => {
+    const el = root.querySelector(selector);
+    if (!el) {
+      throw new Error(`RetireJS UI missing element: ${selector}`);
+    }
+    return el as T;
+  };
 
-  const autoExpandEl = root.querySelector("#auto-expand");
-  const autoFindingsEl = root.querySelector("#auto-findings");
-  const showSummariesEl = root.querySelector("#show-summaries");
-  const limitEl = root.querySelector("#limit");
-  const inScopeEl = root.querySelector("#in-scope");
+  const resultsEl = getElement<HTMLDivElement>("#results");
+  const summaryEl = getElement<HTMLDivElement>("#summary");
+  const searchEl = getElement<HTMLInputElement>("#search");
 
-  const refreshDbBtn = root.querySelector("#refresh-db");
-  const expandAllBtn = root.querySelector("#expand-all");
-  const collapseAllBtn = root.querySelector("#collapse-all");
-  const scanBtn = root.querySelector("#scan");
-  const liveToggleBtn = root.querySelector("#live-toggle");
+  const autoExpandEl = getElement<HTMLInputElement>("#auto-expand");
+  const autoFindingsEl = getElement<HTMLInputElement>("#auto-findings");
+  const showSummariesEl = getElement<HTMLInputElement>("#show-summaries");
+  const limitEl = getElement<HTMLInputElement>("#limit");
+  const inScopeEl = getElement<HTMLInputElement>("#in-scope");
+
+  const refreshDbBtn = getElement<HTMLButtonElement>("#refresh-db");
+  const expandAllBtn = getElement<HTMLButtonElement>("#expand-all");
+  const collapseAllBtn = getElement<HTMLButtonElement>("#collapse-all");
+  const scanBtn = getElement<HTMLButtonElement>("#scan");
+  const liveToggleBtn = getElement<HTMLButtonElement>("#live-toggle");
 
   let liveEnabled = false;
 
-  function updateLiveButtonLabel() {
+  function updateLiveButtonLabel(): void {
     if (liveEnabled) {
       liveToggleBtn.textContent = "Stop Live scanning";
       liveToggleBtn.classList.add("live-on");
@@ -166,37 +268,48 @@ export const init = async (sdk) => {
   autoFindingsEl.checked = !!prefs.autoCreateFindings;
   showSummariesEl.checked =
     typeof prefs.showSummaries === "boolean" ? prefs.showSummaries : true;
-  limitEl.value = prefs.limit ?? 100;
+  limitEl.value = String(prefs.limit ?? 100);
   inScopeEl.checked = !!prefs.inScopeOnly;
   searchEl.value = prefs.query || "";
 
-  async function persistPrefs() {
-    const parsedLimit = parseInt(limitEl.value ?? "100", 10);
-    const next = {
+  async function persistPrefs(): Promise<void> {
+    const parsedLimit = parseInt(limitEl.value || "100", 10);
+    const next: Preferences = {
       autoExpandHighs: autoExpandEl.checked,
       autoCreateFindings: autoFindingsEl.checked,
       showSummaries: showSummariesEl.checked,
-      limit: Number.isFinite(parsedLimit) && parsedLimit >= 0 ? parsedLimit : 100,
+      limit:
+        Number.isFinite(parsedLimit) && parsedLimit >= 0 ? parsedLimit : 100,
       inScopeOnly: inScopeEl.checked,
       query: searchEl.value || "",
     };
     await savePrefs(next);
   }
 
-  [autoExpandEl, autoFindingsEl, showSummariesEl, limitEl, inScopeEl, searchEl].forEach(
-    (el) => {
-      el.addEventListener("change", persistPrefs);
-      el.addEventListener("keyup", persistPrefs);
-    }
-  );
+  const prefInputs: HTMLInputElement[] = [
+    autoExpandEl,
+    autoFindingsEl,
+    showSummariesEl,
+    limitEl,
+    inScopeEl,
+    searchEl,
+  ];
+
+  prefInputs.forEach((el) => {
+    el.addEventListener("change", persistPrefs);
+    el.addEventListener("keyup", persistPrefs);
+  });
 
   //
   // Filtering + controls
   //
 
-  function applySearchFilter() {
+  function applySearchFilter(): void {
     const q = (searchEl.value || "").toLowerCase();
-    for (const details of resultsEl.querySelectorAll("details.accordion")) {
+    const accordions = Array.from(
+      resultsEl.querySelectorAll<HTMLDetailsElement>("details.accordion"),
+    );
+    for (const details of accordions) {
       const url = details.getAttribute("data-url") || "";
       const libs = details.getAttribute("data-libs") || "";
       const match = url.includes(q) || libs.includes(q);
@@ -212,16 +325,26 @@ export const init = async (sdk) => {
       await loadDb(true);
       summaryEl.textContent = "DB refreshed.";
     } catch (e) {
-      summaryEl.textContent = "DB refresh failed: " + e.message;
+      summaryEl.textContent = "DB refresh failed: " + getErrorMessage(e);
     }
   });
 
   expandAllBtn.addEventListener("click", () => {
-    resultsEl.querySelectorAll("details.accordion").forEach((d) => (d.open = true));
+    const accordions = Array.from(
+      resultsEl.querySelectorAll<HTMLDetailsElement>("details.accordion"),
+    );
+    accordions.forEach((d) => {
+      d.open = true;
+    });
   });
 
   collapseAllBtn.addEventListener("click", () => {
-    resultsEl.querySelectorAll("details.accordion").forEach((d) => (d.open = false));
+    const accordions = Array.from(
+      resultsEl.querySelectorAll<HTMLDetailsElement>("details.accordion"),
+    );
+    accordions.forEach((d) => {
+      d.open = false;
+    });
   });
 
   //
@@ -242,7 +365,8 @@ export const init = async (sdk) => {
     } catch (e) {
       liveEnabled = false;
       updateLiveButtonLabel();
-      summaryEl.textContent = "Failed to toggle live scanning: " + e.message;
+      summaryEl.textContent =
+        "Failed to toggle live scanning: " + getErrorMessage(e);
     }
   });
 
@@ -254,7 +378,7 @@ export const init = async (sdk) => {
       await sdk.backend.toggleLiveScanning(db, true, inScopeEl.checked);
     } catch (e) {
       summaryEl.textContent =
-        "Failed to update live scanning scope: " + e.message;
+        "Failed to update live scanning scope: " + getErrorMessage(e);
     }
   });
 
@@ -262,8 +386,8 @@ export const init = async (sdk) => {
   // Main scan (batch)
   //
 
-  async function runScan() {
-    let loading = resultsEl.querySelector(".loading-overlay");
+  async function runScan(): Promise<void> {
+    let loading = resultsEl.querySelector<HTMLDivElement>(".loading-overlay");
     if (!loading) {
       loading = document.createElement("div");
       loading.className = "loading-overlay";
@@ -280,48 +404,48 @@ export const init = async (sdk) => {
 
       summaryEl.textContent = "Scanning...";
 
-      const parsedLimit = parseInt(limitEl.value ?? "100", 10);
-      const options = {
+      const parsedLimit = parseInt(limitEl.value || "100", 10);
+      const options: NonNullable<ScanOptions> = {
         limit:
-          Number.isFinite(parsedLimit) && parsedLimit >= 0
-            ? parsedLimit
-            : 100,
+          Number.isFinite(parsedLimit) && parsedLimit >= 0 ? parsedLimit : 100,
         inScopeOnly: inScopeEl.checked,
         autoCreateFindings: autoFindingsEl.checked,
       };
 
       const { results, counts } = await sdk.backend.scanCapturedJavaScript(
         db,
-        options
+        options,
       );
 
       summaryEl.textContent = `Scanned: ${counts.scanned} | Vulnerable files: ${counts.files} | High: ${counts.high} | Medium: ${counts.medium} | Low: ${counts.low}`;
 
       resultsEl.innerHTML = "";
 
-      results.forEach((r) => {
+      const typedResults = results || [];
+      typedResults.forEach((r: ScanResultEntry) => {
         const highest = highestSeverity(r.findings);
-        const d = document.createElement("details");
-        d.className = "accordion " + highest;
-        d.setAttribute("data-url", r.url.toLowerCase());
-        d.setAttribute(
+        const detailsEl = document.createElement("details");
+        detailsEl.className = "accordion " + highest;
+        detailsEl.setAttribute("data-url", r.url.toLowerCase());
+        detailsEl.setAttribute(
           "data-libs",
-          r.findings.map((f) => f.libName.toLowerCase()).join(" ")
+          r.findings.map((f) => f.libName.toLowerCase()).join(" "),
         );
-        if (autoExpandEl.checked && highest === "high") d.open = true;
+        if (autoExpandEl.checked && highest === "high") detailsEl.open = true;
 
-        const s = document.createElement("summary");
-        s.innerHTML = `
+        const summary = document.createElement("summary");
+        summary.innerHTML = `
           <span class="sev ${highest}">${severityIcon(highest)}</span>
           <span class="path" title="${r.url}">${r.url}</span>
           <span class="count">${r.findings.length} libs</span>
         `;
-        d.appendChild(s);
+        detailsEl.appendChild(summary);
 
         const inner = document.createElement("div");
         inner.className = "inner";
 
-        r.findings.forEach((f) => {
+        const findings = r.findings || [];
+        findings.forEach((f: RetireFinding) => {
           const card = document.createElement("div");
           card.className = "lib-card " + f.severity;
 
@@ -330,35 +454,23 @@ export const init = async (sdk) => {
             ? `<div class="reason">🧠 ${f.reason}</div>`
             : "";
 
-          const rawDetails =
-            f.vulnDetails && Array.isArray(f.vulnDetails) && f.vulnDetails.length
-              ? f.vulnDetails
-              : (f.vulns || []).map((summary) => ({
-                  summary,
-                  severity: f.severity,
-                  refs: [],
-                }));
+          const vulnDetails = normalizeVulnDetails(f).sort(
+            (a: NormalizedVulnDetail, b: NormalizedVulnDetail) =>
+              severityRank[normalizeSeverity(b.severity)] -
+              severityRank[normalizeSeverity(a.severity)],
+          );
 
-          // sort by severity: high → medium → low
-          const sevOrder = { high: 3, medium: 2, low: 1 };
-          const vulnDetails = rawDetails.slice().sort((a, b) => {
-            const sa = sevOrder[(a.severity || "low").toLowerCase()] || 0;
-            const sb = sevOrder[(b.severity || "low").toLowerCase()] || 0;
-            return sb - sa;
-          });
-
-          //  compute Summary + Remediation data 
           let highCount = 0,
             medCount = 0,
             lowCount = 0;
-          let sampleHigh = null,
-            sampleMed = null,
-            sampleLow = null;
-          let minBelow = null;
-          let minAtOrAbove = null;
+          let sampleHigh: string | null = null,
+            sampleMed: string | null = null,
+            sampleLow: string | null = null;
+          let minBelow: string | null = null;
+          let minAtOrAbove: string | null = null;
 
-          vulnDetails.forEach((vd) => {
-            const sev = (vd.severity || f.severity || "low").toLowerCase();
+          vulnDetails.forEach((vd: NormalizedVulnDetail) => {
+            const sev = normalizeSeverity(vd.severity || f.severity);
             if (sev === "high") {
               highCount++;
               if (!sampleHigh) sampleHigh = vd.summary;
@@ -376,7 +488,10 @@ export const init = async (sdk) => {
               }
             }
             if (vd.atOrAbove) {
-              if (!minAtOrAbove || compareVersions(vd.atOrAbove, minAtOrAbove) < 0) {
+              if (
+                !minAtOrAbove ||
+                compareVersions(vd.atOrAbove, minAtOrAbove) < 0
+              ) {
                 minAtOrAbove = vd.atOrAbove;
               }
             }
@@ -408,11 +523,11 @@ export const init = async (sdk) => {
             bodyHtml += fileSummaryHtml + remediationHtml;
           }
 
-          const vulnRefsSet = new Set();
+          const vulnRefsSet = new Set<string>();
 
-          vulnDetails.forEach((vd) => {
-            const refs = (vd.refs || []).filter(Boolean);
-            refs.forEach((u) => vulnRefsSet.add(u));
+          vulnDetails.forEach((vd: NormalizedVulnDetail) => {
+            const refs = vd.refs || [];
+            refs.forEach((u: string) => vulnRefsSet.add(u));
 
             if (refs.length > 0) {
               bodyHtml += `
@@ -430,8 +545,9 @@ export const init = async (sdk) => {
             }
           });
 
-          const extraRefs = (f.references || []).filter(
-            (u) => !vulnRefsSet.has(u)
+          const referenceList = Array.isArray(f.references) ? f.references : [];
+          const extraRefs = referenceList.filter(
+            (u: string) => !!u && !vulnRefsSet.has(u),
           );
           if (extraRefs.length > 0) {
             bodyHtml += `
@@ -459,15 +575,16 @@ export const init = async (sdk) => {
           inner.appendChild(card);
         });
 
-        d.appendChild(inner);
-        resultsEl.appendChild(d);
+        detailsEl.appendChild(inner);
+        resultsEl.appendChild(detailsEl);
       });
 
       applySearchFilter();
     } catch (e) {
-      summaryEl.textContent = "Scan failed: " + e.message;
+      summaryEl.textContent = "Scan failed: " + getErrorMessage(e);
     } finally {
-      const currentOverlay = resultsEl.querySelector(".loading-overlay");
+      const currentOverlay =
+        resultsEl.querySelector<HTMLDivElement>(".loading-overlay");
       if (currentOverlay) {
         currentOverlay.remove();
       }
@@ -475,9 +592,4 @@ export const init = async (sdk) => {
   }
 
   scanBtn.addEventListener("click", runScan);
-  
-
-
 };
-
-

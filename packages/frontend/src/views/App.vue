@@ -3,17 +3,13 @@ import Button from "primevue/button";
 import InputText from "primevue/inputtext";
 import { ref } from "vue";
 
-import { useSDK } from "@/plugins/sdk";
+const myVar = ref(
+  "Use the RetireJS Scanner page from the sidebar to run manual or live scans.",
+);
 
-// Retrieve the SDK instance to interact with the backend
-const sdk = useSDK();
-
-const myVar = ref("Hello World");
-
-// Call the backend to generate a random string
-const onGenerateClick = async () => {
-  const result = await sdk.backend.generateRandomString(10);
-  myVar.value = result;
+const onGenerateClick = () => {
+  myVar.value =
+    "Open the RetireJS Scanner page via the sidebar item to review findings.";
 };
 </script>
 
