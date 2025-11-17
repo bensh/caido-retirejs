@@ -11,11 +11,11 @@ const id = "retire-js";
 export default defineConfig({
   id,
   name: "RetireJS Scanner",
-  description: "Retire.js-like live or manual scanner for Caido: checks request/response URLs, filenames and response bodies with version extraction.",
+  description: "Retire.js-like live or manual scanner for Caido: checks request/response URLs for outdated Javascript.",
   version: "1.0.0",
   author: {
     name: "bensh",
-    email: "dev@caido.io",
+    email: "no-reply@caido.community",
     url: "https://github.com/bensh/caido-retirejs",
   },
   plugins: [
