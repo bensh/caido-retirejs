@@ -814,11 +814,21 @@ export function init(sdk: SDK<RetireAPI>): void {
       enabled?: boolean,
       inScopeOnly?: boolean,
     ): ToggleState => {
+      const nextEnabled = Boolean(enabled);
+      const nextInScopeOnly = Boolean(inScopeOnly);
+
+      const stateChanged =
+        liveEnabled !== nextEnabled || liveInScopeOnly !== nextInScopeOnly;
+
+      if (stateChanged) {
+        processedFindingKeys.clear();
+      }
+
       if (repo !== undefined && repo !== null && typeof repo === "object") {
         liveRepo = repo;
       }
-      liveEnabled = Boolean(enabled);
-      liveInScopeOnly = Boolean(inScopeOnly);
+      liveEnabled = nextEnabled;
+      liveInScopeOnly = nextInScopeOnly;
       return { enabled: liveEnabled };
     },
   );
