@@ -1,7 +1,21 @@
 # Retire.js for Caido
 
 Retire.js-like live or manual scanner for Caido: checks request/response URLs, filenames and response bodies with version extraction. 
+
+Testing can be achieved by finding outdated JS files from here:
+https://cdnjs.com/libraries
+
+Some vulnerable ones
+- https://cdnjs.cloudflare.com/ajax/libs/vue/2.6.11/vue.common.dev.js - LOW
+- https://cdnjs.cloudflare.com/ajax/libs/axios/1.3.5/axios.min.js - HIGH
+- https://cdnjs.cloudflare.com/ajax/libs/axios/0.25.0/axios.min.js - HIGH
+
 # Installation
+## via Community Store [easiest]
+- In Caido, go the the Plugins page
+- Select Community tab
+- Search for RetireJS and Install
+
 ## Manual install
 - Navigate to [Releases](https://github.com/bensh/caido-retirejs/releases)
 - Download the  plugin_package.zip
@@ -35,6 +49,7 @@ Features include:
 - Expand and collapse all findings.
 
 ## Findings
+RetireJS automcatically creates a Caido finding when the 'Live scanning' is enabled, or the check box for 'Auto create findings' is checked when running a Manual scan. Findings are de-duped and only appear once, per Reporter. The inbuilt filter reports these as separate filters to easily distingush how they were found.
 ![Created findings from plugin, manual and live](images/findings.png)
 ![Created findings from plugin, live only](images/live_findings.png)
 
